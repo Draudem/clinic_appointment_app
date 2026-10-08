@@ -1,0 +1,89 @@
+spring:
+  application:
+    name: clinic-voice-backend
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:clinic}
+    username: ${DB_USER:clinic}
+    password: ${DB_PASSWORD:clinic}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate          # схему накатывает Flyway, Hibernate только проверяет
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  servlet:
+    multipart:
+      max-file-size: 15MB
+      max-request-size: 20MB
+
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: always
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+app:
+  security:
+    jwt:
+      # Секрет подписи HS256. В проде ОБЯЗАТЕЛЬНО переопределить через переменную JWT_SECRET (>= 32 байт)
+      secret: ${JWT_SECRET:change-me-in-production-0123456789abcdef0123456789abcdef}
+      ttl: ${JWT_TTL:24h}
+    # Разрешить публичную регистрацию администраторов (для демо лучше выключить)
+    allow-admin-registration: ${ALLOW_ADMIN_REGISTRATION:false}
+
+  cors:
+    # "*" совместим с авторизацией по заголовку Authorization (без cookie)
+    allowed-origins: ${CORS_ORIGINS:*}
+
+  # ---------------------------------------------------------------
+  # Этапы ИИ-конвейера. Каждый этап имеет ПОРТ (интерфейс) и
+  # переключаемую реализацию: "stub" (заглушка) или "http" (живая модель).
+  # Ничего в остальном коде менять не нужно — только эти две строки.
+  # ---------------------------------------------------------------
+  ai:
+    stt:
+      provider: ${STT_PROVIDER:http}            # stub | http
+      url: ${STT_URL:http://localhost:8001/transcribe}
+      connect-timeout-ms: 3000
+      read-timeout-ms: 60000
+      # Текст, который вернёт заглушка (этап распознавания речи)
+      stub-text: ${STT_STUB_TEXT:записаться к терапевту завтра в десять утра}
+
+    parser:
+      provider: ${PARSER_PROVIDER:http}         # stub | http
+      url: ${PARSER_URL:http://localhost:8002/parse}
+      connect-timeout-ms: 3000
+      read-timeout-ms: 30000
+
+  voice:
+    # Куда складывать загруженные аудиозаписи (для отладки и переобработки)
+    storage-dir: ${VOICE_STORAGE_DIR:./data/voice}
+    # На сколько дней вперёд искать свободные слоты, если время не указано
+    search-days-ahead: 14
+    max-candidates: 5
+
+  seed:
+    # Наполнить БД демо-данными (админы, врачи, специальности), если она пустая
+    enabled: ${SEED_ENABLED:true}
