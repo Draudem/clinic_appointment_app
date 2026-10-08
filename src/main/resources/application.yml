@@ -1,0 +1,30 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: clinic-backend
+
+  datasource:
+    # Локально: localhost; в Docker — переопределяется env DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:clinic}
+    username: ${DB_USER:clinic}
+    password: ${DB_PASSWORD:clinic}
+
+  jpa:
+    hibernate:
+      ddl-auto: update   # создание/обновление схемы из entity (демо-режим)
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
+app:
+  jwt:
+    # Секрет обязателен >= 32 символов; в проде/докере переопределяется через env JWT_SECRET
+    secret: ${JWT_SECRET:dev-secret-change-me-0123456789abcdefghijklmnop}
+    ttl-seconds: ${JWT_TTL_SECONDS:86400}
+
+logging:
+  level:
+    com.clinic.backend: INFO
