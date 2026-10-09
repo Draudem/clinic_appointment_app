@@ -48,6 +48,8 @@ public class SecurityConfig {
                         // публичные
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login").permitAll()
                         .requestMatchers("/api/health", "/error").permitAll()
+                        // Swagger UI / OpenAPI — страница со всеми эндпоинтами
+                        .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         // всё остальное — только с валидным JWT
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e

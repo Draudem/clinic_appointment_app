@@ -1,0 +1,65 @@
+# Стек клиники на общем сервере.
+# Чужие стеки (therapy-*) не трогаем: у нас СВОИ network, volume и postgres-контейнер.
+# Работающие вместе бэки подключаются к одному сервису db, запускаются по очереди:
+#   docker compose up -d --build backend
+#   docker compose stop backend
+name: clinic
+
+services:
+  db:
+    image: postgres:16
+    container_name: clinic-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: clinic
+      POSTGRES_USER: clinic
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - clinic-db-data:/var/lib/postgresql/data
+    # Только для админа с самого сервера (DBeaver/psql через ssh-туннель), наружу не открыто
+    ports:
+      - "127.0.0.1:5433:5432"
+    networks: [clinic-net]
+    # На сервере 956 MiB RAM без swap — жёсткие лимиты обязательны
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinic -d clinic"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: &log-rotate
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clinic-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8090"
+      DB_HOST: clinic-db
+      DB_PORT: "5432"
+      DB_NAME: clinic
+      DB_USER: clinic
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      # Куча жёстко ограничена, чтобы бэк не забрал память у чужих контейнеров
+      JAVA_TOOL_OPTIONS: "-Xmx256m"
+    ports:
+      - "8090:8090"
+    networks: [clinic-net]
+    mem_limit: 512m
+    logging: *log-rotate
+
+volumes:
+  clinic-db-data:
+
+networks:
+  clinic-net:

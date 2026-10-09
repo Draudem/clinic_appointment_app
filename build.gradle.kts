@@ -23,6 +23,9 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
+    // Swagger UI / OpenAPI — страница со всеми эндпоинтами в браузере
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.17")
+
     // PostgreSQL (для Docker-деплоя подключается тем же драйвером, меняется только URL через env)
     runtimeOnly("org.postgresql:postgresql")
 
