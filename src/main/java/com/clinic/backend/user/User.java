@@ -21,6 +21,14 @@ public class User {
     @Column(nullable = false, length = 100)
     private String password;
 
+    /** Имя — обязательное поле. */
+    @Column(name = "first_name", nullable = false, length = 100)
+    private String firstName;
+
+    /** Фамилия — обязательное поле. */
+    @Column(name = "last_name", nullable = false, length = 100)
+    private String lastName;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private Role role;
@@ -29,10 +37,12 @@ public class User {
         // for JPA
     }
 
-    public User(String login, String password, Role role) {
+    public User(String login, String password, Role role, String firstName, String lastName) {
         this.login = login;
         this.password = password;
         this.role = role;
+        this.firstName = firstName;
+        this.lastName = lastName;
     }
 
     public Long getId() {
@@ -41,6 +51,22 @@ public class User {
 
     public String getLogin() {
         return login;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
     }
 
     public String getPassword() {

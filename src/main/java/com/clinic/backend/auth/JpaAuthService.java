@@ -35,10 +35,12 @@ public class JpaAuthService implements AuthService {
         }
 
         Role role = parseRole(request.role());
-        User user = new User(login, passwordEncoder.encode(request.password()), role);
+        User user = new User(login, passwordEncoder.encode(request.password()), role,
+                request.firstName().trim(), request.lastName().trim());
         userRepository.save(user);
 
-        return AuthResponse.user(user.getLogin(), user.getRole().name());
+        return AuthResponse.user(user.getLogin(), user.getRole().name(),
+                user.getFirstName(), user.getLastName());
     }
 
     @Override
@@ -50,7 +52,8 @@ public class JpaAuthService implements AuthService {
             throw newBadCredentials();
         }
         String token = jwtService.issue(user.getLogin(), user.getRole());
-        return new AuthResponse(token, user.getLogin(), user.getRole().name());
+        return new AuthResponse(token, user.getLogin(), user.getRole().name(),
+                user.getFirstName(), user.getLastName());
     }
 
     @Override
@@ -58,7 +61,8 @@ public class JpaAuthService implements AuthService {
     public AuthResponse me(String login) {
         User user = userRepository.findByLogin(login)
                 .orElseThrow(JpaAuthService::newBadCredentials);
-        return AuthResponse.user(user.getLogin(), user.getRole().name());
+        return AuthResponse.user(user.getLogin(), user.getRole().name(),
+                user.getFirstName(), user.getLastName());
     }
 
     private static BadCredentialsException newBadCredentials() {

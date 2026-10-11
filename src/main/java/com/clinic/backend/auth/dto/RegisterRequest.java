@@ -12,6 +12,14 @@ public record RegisterRequest(
         @Size(min = 4, max = 100, message = "пароль: 4-100 символов")
         String password,
 
+        @NotBlank(message = "имя обязательно")
+        @Size(max = 100, message = "имя: до 100 символов")
+        String firstName,
+
+        @NotBlank(message = "фамилия обязательна")
+        @Size(max = 100, message = "фамилия: до 100 символов")
+        String lastName,
+
         /**
          * Роль можно указать явно (для создания администраторов),
          * по умолчанию — PATIENT.

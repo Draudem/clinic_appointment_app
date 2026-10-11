@@ -23,8 +23,10 @@ public class DataSeeder {
     ApplicationRunner seedAdmin(UserRepository users, PasswordEncoder encoder) {
         return args -> {
             if (!users.existsByLogin("admin")) {
-                users.save(new User("admin", encoder.encode("admin123"), Role.ADMIN));
-                log.info("Создан администратор admin/admin123");
+                // Демо-администратор: имя/фамилия теперь обязательные поля
+                users.save(new User("admin", encoder.encode("admin123"), Role.ADMIN,
+                        "Иван", "Админов"));
+                log.info("Создан администратор admin/admin123 (Иван Админов)");
             }
         };
     }
