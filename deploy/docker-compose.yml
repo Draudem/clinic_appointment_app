@@ -20,8 +20,10 @@ services:
     ports:
       - "127.0.0.1:5433:5432"
     networks: [clinic-net]
-    # На сервере 956 MiB RAM без swap — жёсткие лимиты обязательны
-    mem_limit: 256m
+    # На сервере 956 MiB RAM — жёсткие лимиты обязательны.
+    # shared_buffers уменьшен, чтобы уложиться в 192m (иначе дефолтные 128MB + накладные расходы).
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=30"]
+    mem_limit: 192m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U clinic -d clinic"]
       interval: 10s
@@ -50,12 +52,18 @@ services:
       DB_USER: clinic
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
+      # Локальная NLU-модель (файлы уже в образе — см. Dockerfile).
+      # На сервере Ollama НЕ разворачиваем: LLM выключена, парсер = nlu.
+      NLU_MODEL_PATH: /app/models/model.onnx
+      NLU_TOKENIZER_PATH: /app/models/tokenizer.json
+      VOICE_PARSER: ${VOICE_PARSER:-nlu}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
       # Куча жёстко ограничена, чтобы бэк не забрал память у чужих контейнеров
       JAVA_TOOL_OPTIONS: "-Xmx256m"
     ports:
       - "8090:8090"
     networks: [clinic-net]
-    mem_limit: 512m
+    mem_limit: 448m
     logging: *log-rotate
 
 volumes:

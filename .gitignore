@@ -14,3 +14,8 @@ out/
 
 # JAR, скопированный в deploy/ для отправки на сервер
 deploy/*.jar
+
+# Файлы NLU-модели, попадающие в deploy/ при подготовке к сборке образа
+# (в репозитории они не хранятся — источник: ai_model/clinic_lm/models/)
+deploy/model.onnx
+deploy/tokenizer.json

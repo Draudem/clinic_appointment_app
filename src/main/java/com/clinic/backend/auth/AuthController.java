@@ -3,6 +3,7 @@ package com.clinic.backend.auth;
 import com.clinic.backend.auth.dto.AuthResponse;
 import com.clinic.backend.auth.dto.LoginRequest;
 import com.clinic.backend.auth.dto.RegisterRequest;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/auth")
+@Tag(name = "Auth", description = "Вход, регистрация, текущий пользователь (JWT)")
 public class AuthController {
 
     private final AuthService authService;

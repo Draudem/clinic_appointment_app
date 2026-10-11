@@ -5,7 +5,8 @@
 `clinic` (свой network, свой volume, свой postgres), порт **8090**.
 
 Память на сервере критически мало (956 MiB), поэтому в compose заданы
-`mem_limit` (db 256m, backend 512m) и `-Xmx256m` для JVM. Дополнительно на сервере
+`mem_limit` (db 192m, backend 448m) и `-Xmx256m` для JVM. У postgres уменьшен
+`shared_buffers` (64MB), чтобы уложиться в лимит. Дополнительно на сервере
 настроен swap 1 ГБ как страховка от OOM-killer (лимиты при этом сохраняются).
 
 ## Быстрый деплой одной командой
@@ -43,11 +44,13 @@ ssh-copy-id root@159.194.246.91     # спросит пароль последн
 - на сервере: <http://159.194.246.91:8090/swagger-ui/index.html>
 - сам OpenAPI-документ (JSON): `/v3/api-docs`
 
-Из Swagger UI можно вызывать эндпоинты прямо в браузере: `POST /api/auth/login`,
-затем «Authorize» -> вставить `Bearer <токен>` -> проверять `/api/auth/me` и
-`/api/appointments`. Реализовано через `springdoc-openapi-starter-webmvc-ui`
-(см. `build.gradle.kts`), пути `/swagger-ui/**` и `/v3/api-docs/**` открыты в
-`SecurityConfig`.
+Из Swagger UI можно вызывать эндпоинты прямо в браузере: `POST /api/auth/login` ->
+скопировать `token`, затем кнопка **Authorize** -> вставить **только сам токен**
+(слово `Bearer` Swagger добавит сам) -> «Try it out» на `/api/auth/me`,
+`/api/appointments` и т.п. Схема безопасности (HTTP Bearer / JWT) описана в
+`config/OpenApiConfig.java`, контроллеры сгруппированы по тегам. Реализовано через
+`springdoc-openapi-starter-webmvc-ui` (см. `build.gradle.kts`), пути
+`/swagger-ui/**` и `/v3/api-docs/**` открыты в `SecurityConfig`.
 
 Ручные шаги ниже — на случай, если скрипты недоступны.
 
@@ -85,8 +88,11 @@ cd VoiceAssistant/backend
 ```bash
 ssh root@159.194.246.91 "mkdir -p /opt/clinic"
 
+# Файлы NLU-модели — из ai_model/clinic_lm/models (model.onnx и tokenizer.json ПАРНЫЕ!)
 scp build/libs/clinic-backend-0.1.0.jar \
     deploy/Dockerfile deploy/docker-compose.yml deploy/.env \
+    ../ai_model/clinic_lm/models/model.onnx \
+    ../ai_model/clinic_lm/models/tokenizer.json \
     root@159.194.246.91:/opt/clinic/
 ```
 
@@ -114,7 +120,22 @@ curl -s -X POST http://159.194.246.91:8090/api/auth/login \
 # {"token":"...","login":"admin","role":"ADMIN"}
 
 curl http://159.194.246.91:8090/api/appointments -H "Authorization: Bearer <TOKEN>"
-# {"appointments":[...]}   без токена — 401
+# [...]  без токена — 401
+
+# ВНИМАНИЕ, контракт роли: во всех ответах (`login`, `me`, `users`) и в JWT роль —
+# канонический код ADMIN / PATIENT (та же форма, что в БД). Русскую метку
+# («Администратор») для отображения делает клиент.
+
+# NLU-модель загружена (локальный ONNX-инференс, без облака)?
+curl http://159.194.246.91:8090/api/nlu/status -H "Authorization: Bearer <TOKEN>"
+# {"model":"onnx:model.onnx","ready":true,...}
+
+# Голосовая запись с подтверждением (текст от мобильного STT)
+curl -s -X POST http://159.194.246.91:8090/api/voice/command \
+  -H "Authorization: Bearer <TOKEN>" -H 'Content-Type: application/json' \
+  -d '{"text":"запишите меня к стоматологу завтра утром"}'
+# {"stage":"PENDING_CONFIRMATION","proposal":{...},"reply":"... Записываю? Ответьте «да» или «нет»."}
+# продолжение: POST /api/voice/answer {"sessionId":N,"text":"да"} -> запись создаётся
 ```
 
 Если снаружи не отвечает, а на сервере контейнер running — порт режет файрвол

@@ -12,7 +12,7 @@ PORT=8090
 URL="http://$(curl -s -m 3 ifconfig.me 2>/dev/null || echo localhost):${PORT}"
 
 echo "== 1/4 Проверка файлов в $(pwd) =="
-for f in Dockerfile docker-compose.yml .env clinic-backend-0.1.0.jar; do
+for f in Dockerfile docker-compose.yml .env clinic-backend-0.1.0.jar model.onnx tokenizer.json; do
   if [ ! -f "$f" ]; then
     echo "ОШИБКА: нет файла $f (скопируй его с локальной машины через scp)"
     exit 1

@@ -45,9 +45,17 @@ echo "== 1/3 Сборка JAR =="
 JAR="$BACKEND_DIR/build/libs/clinic-backend-0.1.0.jar"
 [ -f "$JAR" ] || { echo "ОШИБКА: не найден $JAR"; exit 1; }
 
+# Локальная NLU-модель из ai_model/clinic_lm/models (model.onnx + tokenizer.json — ПАРНЫЕ).
+AI_MODEL_DIR="${AI_MODEL_DIR:-$BACKEND_DIR/../ai_model/clinic_lm/models}"
+MODEL="$AI_MODEL_DIR/model.onnx"
+TOKENIZER="$AI_MODEL_DIR/tokenizer.json"
+[ -f "$MODEL" ] || { echo "ОШИБКА: не найден $MODEL"; exit 1; }
+[ -f "$TOKENIZER" ] || { echo "ОШИБКА: не найден $TOKENIZER"; exit 1; }
+
 echo "== 2/3 Копирование на ${SERVER}:${REMOTE_DIR} =="
 "${SSH[@]}" "$SERVER" "mkdir -p '$REMOTE_DIR'"
 "${SCP[@]}" "$JAR" Dockerfile docker-compose.yml .env up.sh down.sh "$SERVER:$REMOTE_DIR/"
+"${SCP[@]}" "$MODEL" "$TOKENIZER" "$SERVER:$REMOTE_DIR/"
 
 echo "== 3/3 Запуск на сервере =="
 "${SSH[@]}" "$SERVER" "chmod +x '$REMOTE_DIR/up.sh' && '$REMOTE_DIR/up.sh'"

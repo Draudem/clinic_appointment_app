@@ -2,6 +2,7 @@ package com.clinic.backend.common;
 
 import com.clinic.backend.auth.BadCredentialsException;
 import com.clinic.backend.auth.LoginAlreadyExistsException;
+import com.clinic.backend.voice.SpeechToTextException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.AuthenticationException;
@@ -22,6 +23,26 @@ public class ApiExceptionHandler {
     @ExceptionHandler(LoginAlreadyExistsException.class)
     public ResponseEntity<Map<String, String>> loginTaken(LoginAlreadyExistsException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("message", ex.getMessage()));
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<Map<String, String>> conflict(ConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("message", ex.getMessage()));
+    }
+
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<Map<String, String>> notFound(NotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", ex.getMessage()));
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<Map<String, String>> forbidden(ForbiddenException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", ex.getMessage()));
+    }
+
+    @ExceptionHandler(SpeechToTextException.class)
+    public ResponseEntity<Map<String, String>> stt(SpeechToTextException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", ex.getMessage()));
     }
 
     @ExceptionHandler(BadCredentialsException.class)

@@ -29,6 +29,10 @@ dependencies {
     // PostgreSQL (для Docker-деплоя подключается тем же драйвером, меняется только URL через env)
     runtimeOnly("org.postgresql:postgresql")
 
+    // ONNX Runtime — локальный инференс NLU-модели коллеги (model.onnx).
+    // Версия зафиксирована: нативная библиотека тянет ~160 МБ, меняем осознанно.
+    implementation("com.microsoft.onnxruntime:onnxruntime:1.22.0")
+
     // JWT
     implementation("io.jsonwebtoken:jjwt-api:0.12.6")
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")

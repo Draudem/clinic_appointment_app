@@ -1,39 +1,70 @@
 package com.clinic.backend.appointment;
 
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.Map;
 
 /**
- * ЗАГЛУШКА: список записей пациента.
- * Нужна, чтобы проверить защищённый запрос:
- *   без JWT  -> 401, с JWT -> 200 + список.
- *
- * Дальше заменяется на AppointmentService (JPA) без правок контракта:
- * форма ответа {appointments: [...]} останется той же.
+ * Записи пациентов (контракт мобильного приложения):
+ *   GET    /api/appointments             — свои записи (админ — все)
+ *   POST   /api/appointments             — создать запись {doctorId, date, time?}
+ *   DELETE /api/appointments/{id}        — отменить запись
  */
 @RestController
 @RequestMapping("/api/appointments")
+@Tag(name = "Appointments", description = "Записи пациентов: список, создание, отмена")
 public class AppointmentController {
 
+    private final AppointmentService service;
+
+    public AppointmentController(AppointmentService service) {
+        this.service = service;
+    }
+
+    public record BookRequest(
+            @NotNull(message = "doctorId обязателен") Long doctorId,
+            @NotBlank(message = "date обязательна") String date,
+            String time) {
+    }
+
     @GetMapping
-    public Map<String, List<Map<String, Object>>> myAppointments() {
-        List<Map<String, Object>> stub = List.of(
-                Map.of(
-                        "id", 1,
-                        "doctorName", "Иванов Пётр Сергеевич",
-                        "specialty", "Кардиолог",
-                        "date", "2026-10-10",
-                        "time", "09:00"),
-                Map.of(
-                        "id", 2,
-                        "doctorName", "Попова Елена Игоревна",
-                        "specialty", "Терапевт",
-                        "date", "2026-10-13",
-                        "time", "10:30"));
-        return Map.of("appointments", stub);
+    public java.util.List<Map<String, Object>> myAppointments(Authentication authentication) {
+        boolean isAdmin = authentication.getAuthorities()
+                .contains(new SimpleGrantedAuthority("ROLE_ADMIN"));
+        return service.listFor(authentication.getName(), isAdmin);
+    }
+
+    @PostMapping
+    public ResponseEntity<Map<String, Object>> book(
+            Authentication authentication,
+            @Valid @RequestBody BookRequest request) {
+        LocalDate date;
+        try {
+            date = LocalDate.parse(request.date());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Неверный формат даты, ожидается YYYY-MM-DD: " + request.date());
+        }
+        Map<String, Object> created = service.book(authentication.getName(), request.doctorId(), date, request.time());
+        return ResponseEntity.status(HttpStatus.CREATED).body(created);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Map<String, String>> cancel(
+            Authentication authentication,
+            @PathVariable("id") Long id) {
+        boolean isAdmin = authentication.getAuthorities()
+                .contains(new SimpleGrantedAuthority("ROLE_ADMIN"));
+        service.cancel(authentication.getName(), id, isAdmin);
+        return ResponseEntity.ok(Map.of("message", "Запись отменена"));
     }
 }
