@@ -9,6 +9,9 @@ build/
 .vscode/
 out/
 
+# Состояние локального запуска (deploy/dev-up.sh, deploy/dev-down.sh)
+.local-run/
+
 # Локальные секреты (в Docker переопределяются переменными окружения)
 .env
 

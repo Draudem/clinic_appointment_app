@@ -1,0 +1,35 @@
+# Локальная БД для dev-запуска бэкенда (только Postgres).
+# Отдельный compose-проект (по умолчанию clinic-local) — НЕ пересекается с серверным
+# стеком clinic и НЕ трогает чужие ресурсы. Поднимается скриптом deploy/dev-up.sh.
+#
+# Имена ресурсов намеренно с префиксом проекта, чтобы их было легко найти и удалить.
+name: ${PROJECT:-clinic-local}
+
+services:
+  db:
+    image: postgres:16
+    container_name: ${PROJECT:-clinic-local}-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-clinic}
+      POSTGRES_USER: ${DB_USER:-clinic}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-clinic}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Слушаем только на localhost, чтобы не светить БД наружу
+    ports:
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-clinic} -d ${DB_NAME:-clinic}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  db-data:
+    name: ${PROJECT:-clinic-local}-db-data
+
+networks:
+  net:
+    name: ${PROJECT:-clinic-local}-net
