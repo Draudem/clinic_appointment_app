@@ -83,6 +83,14 @@ public class AppointmentService {
     }
 
     public static Map<String, Object> toDto(Appointment a) {
+        String patientName = null;
+        if (a.getPatient() != null) {
+            User p = a.getPatient();
+            String first = p.getFirstName() == null ? "" : p.getFirstName();
+            String last = p.getLastName() == null ? "" : p.getLastName();
+            String joined = (last + " " + first).trim();
+            patientName = joined.isEmpty() ? p.getLogin() : joined;
+        }
         return Map.of(
                 "id", a.getId(),
                 "doctorId", a.getDoctor().getId(),
@@ -90,6 +98,7 @@ public class AppointmentService {
                 "specialty", a.getDoctor().getSpecialty(),
                 "date", a.getDate().toString(),
                 "time", a.getTime(),
-                "status", a.getStatus());
+                "status", a.getStatus(),
+                "patientName", patientName == null ? "" : patientName);
     }
 }

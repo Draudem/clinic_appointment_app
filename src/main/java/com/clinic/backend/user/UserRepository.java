@@ -9,4 +9,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByLogin(String login);
 
     boolean existsByLogin(String login);
+
+    /** Сколько пользователей с ролью — нужно, чтобы не удалить последнего администратора. */
+    long countByRole(Role role);
 }

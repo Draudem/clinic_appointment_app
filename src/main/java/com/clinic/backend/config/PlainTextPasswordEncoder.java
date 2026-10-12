@@ -4,6 +4,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 
 /**
  * Кодировщик-заглушка: пароль не преобразуется, сравниваются строки как есть.
+ * В API пароль не отдаётся (см. UserDto) — администратор его не видит.
  * См. комментарий в SecurityConfig — замена на bcrypt затрагивает только этот класс.
  */
 public class PlainTextPasswordEncoder implements PasswordEncoder {

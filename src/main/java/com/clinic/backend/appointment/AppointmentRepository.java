@@ -11,4 +11,10 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
     List<Appointment> findByPatientIdOrderByDateAscTimeAsc(Long patientId);
 
     Optional<Appointment> findByDoctorIdAndDateAndTimeAndStatus(Long doctorId, LocalDate date, String time, String status);
+
+    /** Активные записи пациента — блокируют удаление пользователя. */
+    long countByPatientIdAndStatus(Long patientId, String status);
+
+    /** Отменённые записи удаляются каскадно вместе с пользователем. */
+    void deleteByPatientIdAndStatus(Long patientId, String status);
 }

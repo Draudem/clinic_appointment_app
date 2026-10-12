@@ -14,9 +14,10 @@ public class User {
     private String login;
 
     /**
-     * Пароль хранится тем же кодом, что и отдаётся (требование демо-фронтенда).
-     * Доступ к кодировке — только через бин PasswordEncoder (см. SecurityConfig):
-     * замена на bcrypt = смена одного бина, остальной код не меняется.
+     * Пароль в API наружу не отдаётся: /api/users возвращает UserDto без этого поля.
+     * Хранится он тем же кодом, что и отдавался раньше (см. SecurityConfig).
+     * Доступ к кодировке — только через бин PasswordEncoder: замена на bcrypt =
+     * смена одного бина, остальной код не меняется.
      */
     @Column(nullable = false, length = 100)
     private String password;
