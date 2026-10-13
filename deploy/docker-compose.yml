@@ -58,12 +58,24 @@ services:
       NLU_TOKENIZER_PATH: /app/models/tokenizer.json
       VOICE_PARSER: ${VOICE_PARSER:-nlu}
       LLM_ENABLED: ${LLM_ENABLED:-false}
-      # Куча жёстко ограничена, чтобы бэк не забрал память у чужих контейнеров
-      JAVA_TOOL_OPTIONS: "-Xmx256m"
+      # Телефония: AudioSocket + GigaAM (Asterisk подключается на STT_AUDIOSOCKET_PORT).
+      STT_ENABLED: "true"
+      STT_AUDIOSOCKET_PORT: "8091"
+      STT_MODEL_DIR: /app/models/stt
+      # Открытый доступ к расшифровкам без JWT — только для наладки. Наружу не выкладывать.
+      STT_PUBLIC_READ: ${STT_PUBLIC_READ:-true}
+      # Без этого JNI не найдёт libonnxruntime.so и STT молча не загрузится.
+      LD_LIBRARY_PATH: /app/lib
+      # Куча ограничена; память модели распознавания живёт вне кучи (нативный код),
+      # поэтому лимит контейнера заметно больше -Xmx.
+      JAVA_TOOL_OPTIONS: "-Xmx${BACKEND_XMX:-384m}"
     ports:
       - "8090:8090"
+      - "8091:8091"        # AudioSocket: сюда подключается Asterisk
     networks: [clinic-net]
-    mem_limit: 448m
+    # С GigaAM бекенд ест заметно больше, чем без STT. Значение по умолчанию
+    # подобрано с запасом; при нехватке памяти поднимите BACKEND_MEM_LIMIT в .env.
+    mem_limit: ${BACKEND_MEM_LIMIT:-1200m}
     logging: *log-rotate
 
 volumes:

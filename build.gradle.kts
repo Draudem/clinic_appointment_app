@@ -33,6 +33,10 @@ dependencies {
     // Версия зафиксирована: нативная библиотека тянет ~160 МБ, меняем осознанно.
     implementation("com.microsoft.onnxruntime:onnxruntime:1.22.0")
 
+    // sherpa-onnx — серверное распознавание речи (GigaAM, русский) для телефонии.
+    // JNI-библиотека лежит внутри jar (native/linux-x64), тянет ~8 МБ.
+    implementation("com.litongjava:sherpa-onnx-java-api:1.0.1")
+
     // JWT
     implementation("io.jsonwebtoken:jjwt-api:0.12.6")
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")

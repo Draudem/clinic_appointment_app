@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Проверка связи и голосового ввода с сервером STT клиники.
+
+Запускается ОДНОЙ командой с любого компьютера, где есть python3.
+Ничего ставить не нужно: только стандартная библиотека.
+
+    python3 -c "import urllib.request as u; exec(u.urlopen('http://АДРЕС:8080/api/stt/public/client').read())"
+
+Что делает:
+  1) если на машине есть программа записи звука (arecord / parec / ffmpeg / sox)
+     -> включается РЕЖИМ МИКРОФОНА: говорите, распознанный текст появляется в терминале;
+  2) если программы записи нет -> автоматический тест: сервер отдаёт образец аудио,
+     он прогоняется через AudioSocket и проверяется, что текст вернулся.
+
+В любом случае проверяется вся цепочка: HTTP -> TCP AudioSocket -> распознавание.
+
+Адрес сервера подставляется сервером при отдаче скрипта, вручную указывать не нужно.
+Дополнительно можно передать:
+    --mic       принудительно включить микрофон
+    --no-mic    принудительно прогнать автоматический тест
+"""
+
+import io
+import json
+import os
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import wave
+
+# --- Подставляются сервером при отдаче скрипта ---
+HOST_PLACEHOLDER
+HTTP_PORT_PLACEHOLDER
+AUDIO_PORT_PLACEHOLDER
+
+TYPE_TERMINATE = 0x00
+TYPE_UUID = 0x01
+TYPE_AUDIO = 0x10
+CHUNK = 320                 # 20 мс на 8 кГц — ровно так шлёт Asterisk
+RATE_8K = 8000
+TIMEOUT = 15
+
+
+def out(m):
+    sys.stdout.write(m + "\n")
+    sys.stdout.flush()
+
+
+def ok(m):
+    out("  [OK]   " + m)
+
+
+def bad(m):
+    out("  [FAIL] " + m)
+
+
+def warn(m):
+    out("  [warn] " + m)
+
+
+def step(m):
+    out("\n== " + m)
+
+
+# --------------------------------------------------------------------------
+# Программы записи звука. Первую найденную и используем.
+# ВАЖНО: все они сразу отдают «сырой» PCM в stdout — это ровно тот формат,
+# который ждёт AudioSocket (int16 little-endian, 8 кГц, моно).
+# --------------------------------------------------------------------------
+RECORDERS = [
+    ("arecord", ["arecord", "-q", "-f", "S16_LE", "-r", "8000", "-c", "1", "-t", "raw", "-"]),
+    ("parec",   ["parec", "--format=s16le", "--rate=8000", "--channels=1"]),
+    ("ffmpeg",  ["ffmpeg", "-hide_banner", "-loglevel", "quiet",
+                 "-f", "alsa", "-ar", "8000", "-ac", "1", "-i", "default", "-f", "s16le", "-"]),
+    ("sox",     ["sox", "-q", "-d", "-r", "8000", "-c", "1", "-b", "16", "-t", "raw", "-"]),
+]
+
+
+def find_recorder():
+    for name, cmd in RECORDERS:
+        if shutil.which(cmd[0]):
+            return name, cmd
+    return None, None
+
+
+def http_get(url, timeout=10):
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as r:
+        return r.read()
+
+
+def http_json(url, timeout=10):
+    return json.loads(http_get(url, timeout).decode("utf-8"))
+
+
+def read_exact(stream, n):
+    """
+    Читает ровно n байт, собирая короткие чтения.
+
+    ВАЖНО: при bufsize=0 stdout процесса отдаётся как «сырой» FileIO, и read(n)
+    возвращает сколько успело прийти — обычно меньше n. Если считать короткое
+    чтение концом потока, запись обрывается после первой же порции: клиент
+    передаёт 0.1 с и молчит. Поэтому копим до нужного размера.
+    Возвращает None на конце потока.
+    """
+    buf = b""
+    while len(buf) < n:
+        chunk = stream.read(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def frame(t, payload=b""):
+    """Кадр AudioSocket: type uint8 + length uint16 (BIG endian) + payload."""
+    return struct.pack("!B", t) + struct.pack("!H", len(payload)) + payload
+
+
+# --------------------------------------------------------------------------
+# Этап 1: доступность сервера
+# --------------------------------------------------------------------------
+def check_http():
+    step("1/3  HTTP-доступность (порт %s)" % HTTP_PORT)
+    base = "http://%s:%s" % (HOST, HTTP_PORT)
+    try:
+        st = http_json(base + "/api/stt/public/status")
+    except urllib.error.HTTPError as e:
+        bad("сервер ответил HTTP %s" % e.code)
+        sys.exit(1)
+    except Exception as e:
+        bad("сервер не отвечает: %s" % e)
+        out("         Проверьте адрес и что бэкенд запущен:")
+        out("         curl http://%s:%s/api/health" % (HOST, HTTP_PORT))
+        sys.exit(1)
+    ok("сервер отвечает")
+    if not st.get("modelReady"):
+        bad("модель распознавания не загружена")
+        out("         На сервере не найдена модель GigaAM или не хватает libonnxruntime.so.")
+        sys.exit(1)
+    ok("модель распознавания загружена")
+    if not st.get("listening"):
+        bad("порт AudioSocket не слушается")
+        sys.exit(1)
+    ok("порт AudioSocket слушает")
+    return base
+
+
+# --------------------------------------------------------------------------
+# Этап 2: TCP
+# --------------------------------------------------------------------------
+def check_tcp():
+    step("2/3  TCP-соединение с AudioSocket (порт %s)" % AUDIO_PORT)
+    try:
+        s = socket.create_connection((HOST, int(AUDIO_PORT)), timeout=TIMEOUT)
+        s.close()
+    except socket.timeout:
+        bad("таймаут соединения")
+        out("         Порт закрыт файрволом, либо адрес %s недостижим из вашей сети." % HOST)
+        sys.exit(1)
+    except ConnectionRefusedError:
+        bad("соединение отклонено")
+        out("         Сервер доступен, но на порту %s никто не слушает." % AUDIO_PORT)
+        sys.exit(1)
+    except OSError as e:
+        bad("не удалось подключиться: %s" % e)
+        out("         Проверьте адрес: %s" % HOST)
+        sys.exit(1)
+    ok("порт открыт и принимает соединения")
+
+
+def open_socket():
+    s = socket.create_connection((HOST, int(AUDIO_PORT)), timeout=TIMEOUT)
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.sendall(frame(TYPE_UUID, bytes(range(16))))
+    return s
+
+
+def finish_socket(s):
+    try:
+        s.sendall(frame(TYPE_TERMINATE))
+    except OSError:
+        pass
+    time.sleep(1.0)
+    try:
+        s.close()
+    except OSError:
+        pass
+
+
+def poll_recognized(base, stop_event, seen, stats):
+    """Фоново опрашивает сервер и печатает новые распознанные фразы."""
+    while not stop_event.is_set():
+        try:
+            d = http_json(base + "/api/stt/public/last", timeout=4)
+            if d.get("found") and d.get("text"):
+                key = (d.get("text"), d.get("at"))
+                if key not in seen:
+                    seen.add(key)
+                    out("   >>> %s" % d["text"])
+                    stats["count"] += 1
+        except Exception:
+            pass
+        stop_event.wait(0.6)
+
+
+# --------------------------------------------------------------------------
+# Этап 3a: микрофон
+# --------------------------------------------------------------------------
+def run_mic(base, cmd):
+    step("3/3  Голосовой ввод с микрофона (%s)" % cmd[0])
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, bufsize=0)
+    except OSError as e:
+        bad("не удалось запустить запись: %s" % e)
+        return False
+
+    try:
+        sock = open_socket()
+    except Exception as e:
+        bad("не удалось подключиться к AudioSocket: %s" % e)
+        proc.kill()
+        return False
+    ok("соединение установлено")
+
+    stop_event = threading.Event()
+    seen, stats = set(), {"count": 0}
+    # Гасим хвост ПРЕДЫДУЩЕГО звонка: иначе клиент сразу печатает последнюю
+    # сохранённую фразу и выглядит так, будто распознал её только что.
+    try:
+        prev = http_json(base + "/api/stt/public/last", timeout=4)
+        if prev.get("found") and prev.get("text"):
+            seen.add((prev.get("text"), prev.get("at")))
+    except Exception:
+        pass
+    threading.Thread(target=poll_recognized, args=(base, stop_event, seen, stats), daemon=True).start()
+
+    out("         говорите в микрофон.  Ctrl+C — закончить.")
+    out("         (пауза ~1.2 с считается концом фразы)")
+    out("")
+
+    sent = 0
+    broken = False
+    try:
+        while True:
+            data = read_exact(proc.stdout, CHUNK)
+            if data is None:
+                break
+            sock.sendall(frame(TYPE_AUDIO, data))
+            sent += CHUNK // 2
+    except KeyboardInterrupt:
+        pass
+    except OSError as e:
+        warn("передача прервана: %s" % e)
+        broken = True
+
+    seconds = sent / float(RATE_8K)
+    # ВАЖНО: поток опроса НЕ останавливаем сразу после Ctrl+C.
+    # Последняя фраза распознаётся только после Terminate и паузы ~1.2 с на сервере,
+    # поэтому если опрос остановить раньше, пользователь потеряет последнюю реплику.
+    finish_socket(sock)
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+
+    out("         ждём последнюю фразу...")
+    deadline = time.time() + 20
+    while time.time() < deadline and stats["count"] == 0:
+        stop_event.wait(0.5)
+    stop_event.set()
+
+    if broken or seconds < 0.5:
+        bad("микрофон не дал звука (передано %.1f с)" % seconds)
+        out("         Проверьте микрофон и уровень записи.")
+        return False
+
+    ok("передано %.1f с звука, распознано фраз: %d" % (seconds, stats["count"]))
+    return stats["count"] > 0
+
+
+# --------------------------------------------------------------------------
+# Этап 3b: автоматический тест по образцу с сервера
+# --------------------------------------------------------------------------
+def wav_to_8k(raw):
+    rate, ch, bits = 16000, 1, 16
+    if raw[:4] == b"RIFF":
+        idx, data_off, dsize = 12, 0, 0
+        while idx + 8 <= len(raw):
+            cid = raw[idx:idx + 4]
+            sz = struct.unpack("<I", raw[idx + 4:idx + 8])[0]
+            if cid == b"fmt ":
+                ch = struct.unpack("<H", raw[idx + 10:idx + 12])[0]
+                rate = struct.unpack("<I", raw[idx + 12:idx + 16])[0]
+                bits = struct.unpack("<H", raw[idx + 22:idx + 24])[0]
+            elif cid == b"data":
+                data_off, dsize = idx + 8, sz
+                break
+            idx += 8 + sz + (sz & 1)
+        raw = raw[data_off:data_off + dsize] if data_off else raw
+        if bits != 16:
+            return None
+    samples = struct.unpack("<%dh" % (len(raw) // 2), raw[:len(raw) // 2 * 2])
+    if ch == 2:
+        samples = [(samples[i] + samples[i + 1]) // 2 for i in range(0, len(samples) - 1, 2)]
+    if rate == 8000:
+        return list(samples)
+    ratio = rate / float(RATE_8K)
+    return [samples[int(i * ratio)] for i in range(int(len(samples) / ratio))]
+
+
+def run_autotest(base):
+    step("3/3  Автоматический тест (образец с сервера)")
+    try:
+        raw = http_get(base + "/api/stt/public/sample.wav", timeout=25)
+        ok("образец аудио получен (%d КБ)" % (len(raw) // 1024))
+    except Exception as e:
+        bad("не удалось скачать образец аудио: %s" % e)
+        return False
+
+    pcm = wav_to_8k(raw)
+    if not pcm:
+        bad("не удалось разобрать WAV")
+        return False
+    pcm = pcm + [0] * int(RATE_8K * 2)
+    ok("аудио готово: %.1f с" % (len(pcm) / float(RATE_8K)))
+
+    try:
+        s = open_socket()
+    except Exception as e:
+        bad("не удалось подключиться к AudioSocket: %s" % e)
+        return False
+    ok("соединение установлено")
+    try:
+        for i in range(0, len(pcm), CHUNK // 2):
+            b = pcm[i:i + CHUNK // 2]
+            b += [0] * (CHUNK // 2 - len(b))
+            s.sendall(frame(TYPE_AUDIO, struct.pack("<%dh" % len(b), *b)))
+        ok("аудио передано")
+    except OSError as e:
+        bad("обрыв при передаче: %s" % e)
+        out("         Соединение рвётся посередине — файрвол или NAT.")
+        finish_socket(s)
+        return False
+    finish_socket(s)
+
+    out("         ждём распознавания...")
+    text, deadline = None, time.time() + 30
+    while time.time() < deadline:
+        try:
+            d = http_json(base + "/api/stt/public/last", timeout=5)
+            if d.get("found") and d.get("text"):
+                text = d["text"]
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    if not text:
+        bad("сервер принял звонок, но текст не вернул")
+        out("         Связь есть, проблема в распознавании.")
+        return False
+    ok("распознано: «%s»" % text)
+    return True
+
+
+def main():
+    argv = sys.argv[1:]
+    force_mic = "--mic" in argv or "--microphone" in argv
+    force_auto = "--no-mic" in argv or "--autotest" in argv
+
+    out("\n=== Проверка связи с сервером STT клиники ===")
+    out("сервер: %s:%s (HTTP), %s (AudioSocket)" % (HOST, HTTP_PORT, AUDIO_PORT))
+
+    base = check_http()
+    check_tcp()
+
+    name, cmd = (None, None)
+    if not force_auto:
+        name, cmd = find_recorder()
+    else:
+        warn("--no-mic: пропускаем микрофон, работает автоматический тест")
+
+    good = False
+    if name:
+        if run_mic(base, cmd):
+            good = True
+    else:
+        if not force_auto:
+            warn("программа записи звука не найдена (arecord/parec/ffmpeg/sox)")
+            out("         На этой машине не с чем снять голос — работает автоматический тест.")
+            out("         Чтобы проверять голос: sudo apt install alsa-utils")
+        good = run_autotest(base)
+
+    out("\n" + "=" * 52)
+    if good:
+        out("ИТОГ: СВЯЗЬ РАБОТАЕТ.")
+        out("Можно подключать Asterisk:")
+        out("    AudioSocket(%s:%s)" % (HOST, AUDIO_PORT))
+        out("=" * 52)
+        sys.exit(0)
+    else:
+        out("ИТОГ: НЕ СРАБОТАЛО — смотрите строку [FAIL] выше.")
+        out("=" * 52)
+        sys.exit(2)
+
+
+main()

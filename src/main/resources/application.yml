@@ -46,6 +46,31 @@ app:
     parser: ${VOICE_PARSER:nlu}
     max-exchanges: ${VOICE_MAX_EXCHANGES:5}
 
+  # Серверное распознавание речи для телефонии (Asterisk AudioSocket -> GigaAM).
+  # Asterisk шлёт PCM 16-bit 8 kHz mono, модель обучена на 16 kHz -> ресемплинг внутри.
+  stt:
+    enabled: ${STT_ENABLED:true}
+    # Открытый (без JWT) доступ к распознанным фразам — только чтение, для наладки.
+    # Перед выкладкой наружу выключить: STT_PUBLIC_READ=false
+    public-read: ${STT_PUBLIC_READ:true}
+    # Адрес, который подставляется в клиент проверки связи (/api/stt/public/client).
+    # Пусто = берётся из того адреса, по которому клиент сам пришёл за скриптом.
+    # Задавать явно нужно, если снаружи несколько интерфейсов (VPN, docker, 0.0.0.0).
+    advertised-host: ${STT_ADVERTISED_HOST:}
+    # TCP-порт AudioSocket. Asterisk подключается СЮДА, а не на HTTP-порт.
+    audiosocket-port: ${STT_AUDIOSOCKET_PORT:8091}
+    # Каталог с файлами модели GigaAM (model.int8.onnx + tokens.txt)
+    model-dir: ${STT_MODEL_DIR:models/stt/sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19}
+    num-threads: ${STT_NUM_THREADS:2}
+    # Пауза тишины, которая считается концом фразы (секунды)
+    silence-seconds: ${STT_SILENCE_SECONDS:1.2}
+    # Максимальная длина одной фразы, после неё форсируем распознавание (секунды)
+    max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:20}
+    # Отдавать ли распознанный текст обратно в сокет.
+    # true  -> синтез речи TTS и отправка аудио (0x10) обратно в Asterisk;
+    # false -> в сокет уходит только тишина, текст забирают по HTTP (режим заглушки).
+    speak-replies: ${STT_SPEAK_REPLIES:false}
+
   # LLM-этап (задел под Ollama / OpenAI-совместимый API). По умолчанию выключен:
   # на текущем сервере Ollama не помещается вместе с Postgres и JVM.
   llm:

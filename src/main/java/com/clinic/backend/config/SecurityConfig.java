@@ -51,6 +51,11 @@ public class SecurityConfig {
                         .requestMatchers("/api/health", "/error").permitAll()
                         // Swagger UI / OpenAPI — страница со всеми эндпоинтами
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
+                        // Отладочный доступ к распознанным фразам — только чтение, без JWT.
+                        // Нужен для наладки телефонии (напарник с Asterisk), чтобы не возиться
+                        // с токеном при отладке. Основной /api/stt/* остаётся под авторизацией.
+                        // ВНИМАНИЕ: это транскрипты разговоров — в продакшене закрыть.
+                        .requestMatchers("/api/stt/public/**").permitAll()
                         // всё остальное — только с валидным JWT
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e

@@ -21,7 +21,29 @@ ENV NLU_MODEL_PATH=/app/models/model.onnx \
     VOICE_PARSER=nlu \
     LLM_ENABLED=false
 
+# --- Серверное распознавание речи (телефония) ---
+# STT-модель GigaAM и нативная библиотека НЕ лежат в репозитории: их качает
+# deploy/fetch-stt-model.sh и fetch-stt-libs.sh, а сюда deploy-local.sh копирует.
+#
+# ЗАЧЕМ нужна отдельная libonnxruntime.so (версия 1.17.1):
+# JNI-библиотека sherpa-onnx собрана против неё и требует символ VERS_1.17.1,
+# тогда как в проекте для NLU используется onnxruntime 1.22.0. Это РАЗНЫЕ SONAME
+# (libonnxruntime.so и libonnxruntime.so.1), поэтому обе спокойно живут в одном
+# процессе. Подменять версию NLU на 1.17.1 нельзя — модель коллеги собрана под 1.22.
+COPY model.int8.onnx /app/models/stt/model.int8.onnx
+COPY tokens.txt /app/models/stt/tokens.txt
+COPY libonnxruntime.so /app/lib/libonnxruntime.so
+
+# LD_LIBRARY_PATH обязателен: без него JNI не находит libonnxruntime.so при старте,
+# STT молча не загружается и порт AudioSocket не поднимается.
+ENV LD_LIBRARY_PATH=/app/lib \
+    STT_ENABLED=true \
+    STT_AUDIOSOCKET_PORT=8091 \
+    STT_MODEL_DIR=/app/models/stt
+
 # Порт должен совпадать с SERVER_PORT из docker-compose.yml и с ports-маппингом
 EXPOSE 8090
+# TCP-порт AudioSocket — сюда подключается Asterisk (не HTTP!)
+EXPOSE 8091
 
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

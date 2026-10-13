@@ -22,3 +22,19 @@ deploy/*.jar
 # (в репозитории они не хранятся — источник: ai_model/clinic_lm/models/)
 deploy/model.onnx
 deploy/tokenizer.json
+
+# STT-модель GigaAM (~236 МБ) — качается отдельно, в git не попадает.
+# См. deploy/fetch-stt-model.sh
+models/stt/
+
+# Те же файлы, скопированные в deploy/ при подготовке к сборке образа.
+# deploy-local.sh кладёт их рядом с Dockerfile, откуда их COPYит.
+# Без этих правил в коммит уехало бы ~240 МБ.
+deploy/model.int8.onnx
+deploy/tokens.txt
+
+# Нативная libonnxruntime.so для sherpa-onnx (~15 МБ) — качается отдельно.
+# См. deploy/fetch-stt-libs.sh
+lib/*.so
+lib/*.so.*
+deploy/libonnxruntime.so
