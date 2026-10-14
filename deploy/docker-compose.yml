@@ -66,7 +66,11 @@ services:
       STT_PUBLIC_READ: ${STT_PUBLIC_READ:-true}
       # Без этого JNI не найдёт libonnxruntime.so и STT молча не загрузится.
       LD_LIBRARY_PATH: /app/lib
-      # Куча ограничена; память модели распознавания живёт вне кучи (нативный код),
+      # Синтез речи (голосовой ответ). Без модели Piper бин уходит в заглушку:
+      # звонки принимаются, но звонящий слышит тишину.
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      TTS_MODEL_DIR: /app/models/tts/vits-piper-ru_RU-irina-medium-int8
+      # Куча ограничена; память моделей живёт вне кучи (нативный код),
       # поэтому лимит контейнера заметно больше -Xmx.
       JAVA_TOOL_OPTIONS: "-Xmx${BACKEND_XMX:-384m}"
     ports:

@@ -27,6 +27,10 @@ deploy/tokenizer.json
 # См. deploy/fetch-stt-model.sh
 models/stt/
 
+# Модель синтеза речи Piper (~37 МБ) — качается отдельно.
+# См. deploy/fetch-tts-model.sh
+models/tts/
+
 # Те же файлы, скопированные в deploy/ при подготовке к сборке образа.
 # deploy-local.sh кладёт их рядом с Dockerfile, откуда их COPYит.
 # Без этих правил в коммит уехало бы ~240 МБ.

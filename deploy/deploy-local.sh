@@ -83,11 +83,31 @@ fi
 [ -f "$STT_TOKENS" ] || { echo "ОШИБКА: не найден $STT_TOKENS"; exit 1; }
 [ -f "$STT_LIB" ]    || { echo "ОШИБКА: не найден $STT_LIB"; exit 1; }
 
+# Модель синтеза речи Piper. Без неё голосовой ответ не заработает, но звонки
+# и распознавание останутся рабочими — сработает заглушка с тишиной.
+TTS_NAME="vits-piper-ru_RU-irina-medium-int8"
+TTS_MODEL_DIR="${TTS_MODEL_DIR:-$BACKEND_DIR/models/tts/$TTS_NAME}"
+if [ ! -f "$TTS_MODEL_DIR/ru_RU-irina-medium.onnx" ]; then
+  echo "== 2/4 Скачиваем модель синтеза Piper (20 МБ, делается один раз) =="
+  "$BACKEND_DIR/deploy/fetch-tts-model.sh"
+fi
+[ -f "$TTS_MODEL_DIR/ru_RU-irina-medium.onnx" ] || {
+  echo "ВНИМАНИЕ: нет модели синтеза — голосовой ответ работать не будет (звонки примут)."; }
+# Dockerfile делает COPY tts-model/, поэтому готовим такой каталог рядом с ним.
+STAGE="$BACKEND_DIR/deploy/tts-model"
+rm -rf "$STAGE" && mkdir -p "$STAGE"
+[ -f "$TTS_MODEL_DIR/ru_RU-irina-medium.onnx" ] && cp -r "$TTS_MODEL_DIR" "$STAGE/"
+
 echo "== 3/4 Копирование на ${SERVER}:${REMOTE_DIR} =="
-"${SSH[@]}" "$SERVER" "mkdir -p '$REMOTE_DIR'"
+"${SSH[@]}" "$SERVER" "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/tts-model'"
 "${SCP[@]}" "$JAR" Dockerfile docker-compose.yml .env up.sh down.sh "$SERVER:$REMOTE_DIR/"
 "${SCP[@]}" "$MODEL" "$TOKENIZER" "$SERVER:$REMOTE_DIR/"
 "${SCP[@]}" "$STT_MODEL" "$STT_TOKENS" "$STT_LIB" "$SERVER:$REMOTE_DIR/"
+if [ -d "$STAGE/$TTS_NAME" ]; then
+  "${SCP[@]}" "$STAGE/$TTS_NAME/ru_RU-irina-medium.onnx" "$STAGE/$TTS_NAME/tokens.txt" "$SERVER:$REMOTE_DIR/tts-model/"
+  "${SCP[@]}" -r "$STAGE/$TTS_NAME/espeak-ng-data" "$SERVER:$REMOTE_DIR/tts-model/"
+fi
+rm -rf "$STAGE"
 
 echo "== 4/4 Запуск на сервере =="
 "${SSH[@]}" "$SERVER" "chmod +x '$REMOTE_DIR/up.sh' && '$REMOTE_DIR/up.sh'"

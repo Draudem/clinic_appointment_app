@@ -8,6 +8,6 @@ import org.springframework.context.annotation.Configuration;
  * чтобы порт и модель настраивались в одном месте.
  */
 @Configuration
-@EnableConfigurationProperties(SttProperties.class)
+@EnableConfigurationProperties({SttProperties.class, TtsProperties.class})
 public class SttConfig {
 }

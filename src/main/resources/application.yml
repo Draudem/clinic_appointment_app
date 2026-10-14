@@ -46,6 +46,20 @@ app:
     parser: ${VOICE_PARSER:nlu}
     max-exchanges: ${VOICE_MAX_EXCHANGES:5}
 
+  # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
+  # Если модель не найдена или TTS_ENABLED=false — работает заглушка: звонящий слышит
+  # тишину, но звонки принимаются и речь распознаётся как обычно.
+  tts:
+    enabled: ${TTS_ENABLED:true}
+    model-dir: ${TTS_MODEL_DIR:models/tts/vits-piper-ru_RU-irina-medium-int8}
+    num-threads: ${TTS_NUM_THREADS:2}
+    speed: ${TTS_SPEED:1.0}
+    # Кавычки обязательны: в тексте приветствия есть двоеточие, без них YAML рвётся
+    # на "mapping values are not allowed here".
+    greeting: "${TTS_GREETING:Для записи на приём сообщите следующую информацию: специальность или симптомы, желаемую дату и время.}"
+    reply-on-silence: "${TTS_REPLY_ON_SILENCE:Спасибо, записываю.}"
+    close-delay-seconds: ${TTS_CLOSE_DELAY_SECONDS:2}
+
   # Серверное распознавание речи для телефонии (Asterisk AudioSocket -> GigaAM).
   # Asterisk шлёт PCM 16-bit 8 kHz mono, модель обучена на 16 kHz -> ресемплинг внутри.
   stt:

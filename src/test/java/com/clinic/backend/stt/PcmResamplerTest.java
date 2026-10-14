@@ -3,7 +3,6 @@ package com.clinic.backend.stt;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -198,6 +197,7 @@ class PcmResamplerTest {
             assertEquals(0f, v, 0f, "должна быть ровно тишина");
         }
         assertTrue(!s.available());
-        assertNull(s.synthesize(""));
+        assertEquals(0, s.synthesize("").length);
+        assertEquals(8000, s.sampleRate(), "частота заглушки совпадает с форматом AudioSocket");
     }
 }

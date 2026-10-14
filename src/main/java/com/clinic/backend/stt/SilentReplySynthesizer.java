@@ -1,28 +1,33 @@
 package com.clinic.backend.stt;
 
 /**
- * Заглушка синтеза: возвращает тишину вместо речи.
+ * Заглушка синтеза: возвращает тишину нужной длительности.
  *
- * Зачем она нужна уже сейчас: Asterisk ждёт ответа в сокет, и если не отправить
- * ничего, он может посчитать вызов зависшим. Ровно тишины достаточно, чтобы
- * соединение жило, а текст при этом забирается по HTTP — так работает первый тест.
+ * Нужна, когда модель Piper не загрузилась или синтез выключен. Звонок при этом
+ * не обрывается: звонящий слышит тишину, а сервер продолжает принимать аудио и
+ * распознавать речь — этого достаточно, чтобы проверить связь и распознавание.
  *
- * Длительность тишины пропорциональна длине текста (по грубой оценке 12 мс на символ),
- * чтобы напарник слышал паузу, пропорциональную объёму ответа.
+ * Длительность тишины пропорциональна длине текста, чтобы пауза выглядела
+ * осмысленной, а не мгновенным щелчком.
  */
 public class SilentReplySynthesizer implements ReplySynthesizer {
 
-    private static final int SAMPLE_RATE = 16000;
-    private static final int MS_PER_CHAR = 12;
-    private static final int MAX_MS = 4000;
+    private static final int SAMPLE_RATE = 8000;
+    private static final int MS_PER_CHAR = 45;    // ~13 символов в секунду
+    private static final int MAX_MS = 8000;
 
     @Override
     public float[] synthesize(String text) {
         if (text == null || text.isBlank()) {
-            return null;
+            return new float[0];
         }
         int ms = Math.min(MAX_MS, Math.max(300, text.length() * MS_PER_CHAR));
         return new float[SAMPLE_RATE * ms / 1000];
+    }
+
+    @Override
+    public int sampleRate() {
+        return SAMPLE_RATE;
     }
 
     @Override

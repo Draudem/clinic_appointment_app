@@ -75,6 +75,7 @@ public class AsteriskAudioSocketServer implements Runnable {
     private final SpeechRecognizer recognizer;
     private final ReplySynthesizer synthesizer;
     private final SttProperties props;
+    private final TtsProperties ttsProps;
     private final TranscriptStore transcriptStore;
 
     private ServerSocket serverSocket;
@@ -89,10 +90,12 @@ public class AsteriskAudioSocketServer implements Runnable {
     public AsteriskAudioSocketServer(SpeechRecognizer recognizer,
                                      ReplySynthesizer synthesizer,
                                      SttProperties props,
+                                     TtsProperties ttsProps,
                                      TranscriptStore transcriptStore) {
         this.recognizer = recognizer;
         this.synthesizer = synthesizer;
         this.props = props;
+        this.ttsProps = ttsProps;
         this.transcriptStore = transcriptStore;
     }
 
@@ -152,12 +155,22 @@ public class AsteriskAudioSocketServer implements Runnable {
         int minSamples = (int) (16000 * props.getMinUtteranceSeconds());
         int maxSamples = (int) (16000 * props.getMaxUtteranceSeconds());
         String callUuid = "call-" + callId;
+        CallVoice voice = null;
+        // Ответили ли уже: первая распознанная фраза завершает сценарий звонка.
+        boolean answered = false;
 
         try {
             socket.setTcpNoDelay(true);   // без этого Asterisk рвёт кадры по Nagle
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             DataInputStream in = new DataInputStream(socket.getInputStream());
             OutputStream out = socket.getOutputStream();
+
+            // Голосовой поток живёт всё время звонка. Он синтезирует и отправляет,
+            // а поток чтения ниже продолжает принимать и распознавать речь клиента —
+            // в том числе пока ассистент говорит.
+            voice = new CallVoice(out, synthesizer);
+            voice.enqueue(ttsProps.getGreeting());
+            log.info("Звонок #{}: озвучено приветствие, синтез {}", callId, synthesizer.name());
 
             while (running) {
                 int type = in.read();
@@ -176,7 +189,7 @@ public class AsteriskAudioSocketServer implements Runnable {
                 switch (type) {
                     case TYPE_TERMINATE -> {
                         log.info("Звонок #{}: Terminate", callId);
-                        flushUtterance(callId, callUuid, segmenter, minSamples, out);
+                        flushUtterance(callId, callUuid, segmenter, minSamples);
                         return;
                     }
                     case TYPE_UUID -> {
@@ -197,7 +210,20 @@ public class AsteriskAudioSocketServer implements Runnable {
                             boolean finished = segmenter.feed(piece);
                             start = end;
                             if (finished || segmenter.bufferedSeconds() >= props.getMaxUtteranceSeconds()) {
-                                flushUtterance(callId, callUuid, segmenter, minSamples, out);
+                                // Фраза клиента. Распознаём и пишем текст ВСЕГДА,
+                                // в том числе пока ассистент ещё договаривает.
+                                String said = flushUtterance(callId, callUuid, segmenter, minSamples);
+                                if (said != null && !said.isBlank() && !answered) {
+                                    // Первая распознанная фраза — отвечаем и завершаем звонок.
+                                    answered = true;
+                                    voice.enqueue(ttsProps.getReplyOnSilence());
+                                    log.info("Звонок #{}: отвечаем «{}» и ждём окончания озвучки",
+                                            callId, ttsProps.getReplyOnSilence());
+                                    voice.awaitFinished(30);
+                                    sleepQuietly(ttsProps.getCloseDelaySeconds() * 1000L);
+                                    log.info("Звонок #{}: фраза дозвучала, закрываем соединение", callId);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -214,6 +240,9 @@ public class AsteriskAudioSocketServer implements Runnable {
             // Иначе исключение уйдёт в Future и поток молча умрёт — звонок «исчезнет».
             log.error("Звонок #{}: непредвиденная ошибка разбора потока", callId, e);
         } finally {
+            if (voice != null) {
+                voice.close();
+            }
             try {
                 socket.close();
             } catch (IOException ignored) {
@@ -224,62 +253,43 @@ public class AsteriskAudioSocketServer implements Runnable {
         }
     }
 
-    /** Распознаёт накопленную фразу, публикует текст и (в будущем) озвучивает ответ. */
-    private void flushUtterance(long callId, String callUuid,
-                               UtteranceSegmenter segmenter, int minSamples,
-                               OutputStream out) {
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Распознаёт накопленную фразу и возвращает её текст.
+     *
+     * Текст пишется в лог и в хранилище ВСЕГДА, когда что-то распознано, —
+     * в том числе в тот момент, когда ассистент ещё договаривает приветствие.
+     * Именно ради этого озвучивание вынесено в отдельный поток.
+     *
+     * @return распознанный текст или пустая строка
+     */
+    private String flushUtterance(long callId, String callUuid,
+                                 UtteranceSegmenter segmenter, int minSamples) {
         float[] utterance = segmenter.takeUtterance();
         if (utterance.length < minSamples) {
-            log.info("Звонок #{}: накоплено {} сэмплов (минимум {}) — речи не распознали",
+            log.debug("Звонок #{}: {} сэмплов (минимум {}) — тишина, не речь",
                     callId, utterance.length, minSamples);
-            return;                                  // щелчок в линии, не речь
+            return "";                                  // щелчок в линии, не речь
         }
         String text = recognizer.transcribe(utterance);
         if (text == null || text.isBlank()) {
             log.info("Звонок #{}: речь не распознана ({} сэмплов)", callId, utterance.length);
             transcriptStore.add(callUuid, "", (utterance.length / 16000.0f));
-            return;
+            return "";
         }
         log.info("Звонок #{} РАСПОЗНАНО: «{}»", callId, text);
         transcriptStore.add(callUuid, text, utterance.length / 16000.0f);
-
-        if (props.isSpeakReplies() && synthesizer.available()) {
-            float[] reply = synthesizer.synthesize(text);
-            if (reply != null && reply.length > 0) {
-                sendAudio(out, reply);
-            }
-        }
+        return text;
     }
 
     /** Отправляет аудио в Asterisk кадрами по 320 байт (= 20 мс на 8 кГц). */
-    private void sendAudio(OutputStream out, float[] samples16k) {
-        float[] at8k = downsample(samples16k);
-        byte[] pcm = PcmResampler.floatToBytes(at8k);
-        try {
-            int offset = 0;
-            while (offset < pcm.length) {
-                int len = Math.min(TYPICAL_CHUNK, pcm.length - offset);
-                out.write(TYPE_AUDIO);
-                out.write((len >> 8) & 0xFF);        // длина — big endian
-                out.write(len & 0xFF);
-                out.write(pcm, offset, len);
-                offset += len;
-            }
-            out.flush();
-        } catch (IOException e) {
-            log.warn("Не удалось отправить аудио в Asterisk: {}", e.getMessage());
-        }
-    }
-
-    /** Простое прореживание 16 кГц -> 8 кГц (для исходящего аудио точность не важна). */
-    private static float[] downsample(float[] samples16k) {
-        float[] out = new float[samples16k.length / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = samples16k[i * 2];
-        }
-        return out;
-    }
-
     private static long bytesToLong(byte[] b, int off) {
         long v = 0;
         for (int i = 0; i < 8; i++) {
@@ -314,9 +324,22 @@ public class AsteriskAudioSocketServer implements Runnable {
             return new SherpaSttEngine(props.getModelDir(), props.getNumThreads());
         }
 
-        /** Пока TTS нет — тишина. Под TTS достаточно вернуть здесь другую реализацию. */
+        /**
+         * Синтез речи. Если модель Piper не нашлась — молча откатываемся на заглушку:
+         * звонки продолжают приниматься и распознаваться, просто звонящий слышит тишину.
+         */
         @Bean
-        ReplySynthesizer replySynthesizer() {
+        ReplySynthesizer replySynthesizer(TtsProperties ttsProps) {
+            if (ttsProps.isEnabled()) {
+                SherpaTtsEngine piper = new SherpaTtsEngine(
+                        ttsProps.getModelDir(), ttsProps.getNumThreads(), ttsProps.getSpeed());
+                if (piper.available()) {
+                    return piper;
+                }
+                log.warn("TTS недоступен ({}), работает заглушка с тишиной", piper.error());
+            } else {
+                log.info("TTS выключен (app.tts.enabled=false), работает заглушка с тишиной");
+            }
             return new SilentReplySynthesizer();
         }
 

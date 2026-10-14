@@ -41,6 +41,16 @@ ENV LD_LIBRARY_PATH=/app/lib \
     STT_AUDIOSOCKET_PORT=8091 \
     STT_MODEL_DIR=/app/models/stt
 
+# --- Синтез речи (голосовой ответ в трубку) ---
+# Модель Piper ru_RU-irina: ONNX + словарь токенов + каталог espeak-ng-data.
+# В репозитории её нет (~37 МБ), качает deploy/fetch-tts-model.sh.
+# Если модель не попала в образ, бин TTS не поднимется и бэкенд отдаст заглушку:
+# звонки принимаются, речь распознаётся, но звонящий слышит тишину.
+COPY tts-model/ /app/models/tts/
+
+ENV TTS_ENABLED=true \
+    TTS_MODEL_DIR=/app/models/tts/vits-piper-ru_RU-irina-medium-int8
+
 # Порт должен совпадать с SERVER_PORT из docker-compose.yml и с ports-маппингом
 EXPOSE 8090
 # TCP-порт AudioSocket — сюда подключается Asterisk (не HTTP!)

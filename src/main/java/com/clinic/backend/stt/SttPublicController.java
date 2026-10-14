@@ -35,15 +35,18 @@ public class SttPublicController {
 
     private final TranscriptStore transcripts;
     private final SpeechRecognizer recognizer;
+    private final ReplySynthesizer synthesizer;
     private final AsteriskAudioSocketServer server;
     private final boolean enabled;
 
     public SttPublicController(TranscriptStore transcripts,
                                SpeechRecognizer recognizer,
+                               ReplySynthesizer synthesizer,
                                AsteriskAudioSocketServer server,
                                @Value("${app.stt.public-read:true}") boolean enabled) {
         this.transcripts = transcripts;
         this.recognizer = recognizer;
+        this.synthesizer = synthesizer;
         this.server = server;
         this.enabled = enabled;
     }
@@ -91,6 +94,9 @@ public class SttPublicController {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("modelReady", recognizer.ready());
         m.put("listening", server.isListening());
+        m.put("tts", synthesizer.name());
+        m.put("ttsReady", synthesizer.available());
+        m.put("ttsRate", synthesizer.sampleRate());
         return m;
     }
 }
