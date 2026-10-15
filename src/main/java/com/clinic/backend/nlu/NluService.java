@@ -2,6 +2,7 @@ package com.clinic.backend.nlu;
 
 import org.springframework.stereotype.Service;
 
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -18,7 +19,29 @@ public class NluService {
     }
 
     public NluFrame parse(String text) {
-        return model.parse(text);
+        return model.parse(normalize(text));
+    }
+
+    /**
+     * Приводит реплику к виду, на котором модель обучена.
+     *
+     * ЗАЧЕМ. Модель обучена на синтетике в нижнем регистре и к регистру крайне
+     * чувствительна: «запишите к терапевту» -> BOOK, «Запишите к терапевту» -> CANCEL,
+     * «ЗАПИШИТЕ К ТЕРАПЕВТУ» -> UNSUPPORTED. Сейчас это не видно только потому,
+     * что GigaAM печатает строчными; смена распознавателя — и сценарий развалится.
+     * Нормализуем здесь, в единственной точке входа, чтобы правило действовало
+     * на любую будущую реализацию NluModel.
+     *
+     * Пунктуацию НЕ трогаем: модель на ней обучена.
+     */
+    private static String normalize(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text.toLowerCase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     public Map<String, Object> status() {

@@ -6,6 +6,7 @@ import com.clinic.backend.common.ForbiddenException;
 import com.clinic.backend.common.NotFoundException;
 import com.clinic.backend.doctor.Doctor;
 import com.clinic.backend.doctor.DoctorRepository;
+import com.clinic.backend.schedule.ScheduleProvider;
 import com.clinic.backend.user.User;
 import com.clinic.backend.user.UserRepository;
 import org.springframework.stereotype.Service;
@@ -27,13 +28,16 @@ public class AppointmentService {
     private final AppointmentRepository appointments;
     private final DoctorRepository doctors;
     private final UserRepository users;
+    private final ScheduleProvider schedule;
 
     public AppointmentService(AppointmentRepository appointments,
                               DoctorRepository doctors,
-                              UserRepository users) {
+                              UserRepository users,
+                              ScheduleProvider schedule) {
         this.appointments = appointments;
         this.doctors = doctors;
         this.users = users;
+        this.schedule = schedule;
     }
 
     @Transactional
@@ -48,7 +52,12 @@ public class AppointmentService {
         if (time == null || time.isBlank()) {
             time = doctor.getTime();
         }
-        if (!doctor.getTime().equals(time)) {
+        // Истина о том, когда врач принимает, — расписание, а не поле doctors.time.
+        // Пока расписание берётся из той же таблицы, поведение прежнее, но с
+        // переключением на Excel времена приёма начинают различаться, и проверка
+        // по doctors.time отвергала бы всё, кроме одного времени в день.
+        boolean inSchedule = schedule.exact(doctor.getFio(), date, time).isPresent();
+        if (!inSchedule && !doctor.getTime().equals(time)) {
             throw new ConflictException("Время приёма врача: " + doctor.getTime());
         }
         boolean taken = appointments

@@ -32,12 +32,13 @@ app:
     ttl-seconds: ${JWT_TTL_SECONDS:86400}
 
   # NLU-этап: локальная ONNX-модель "текст -> semantic frame".
-  # Пути по умолчанию ведут на модель коллеги из ai_model/clinic_lm/models
-  # (относительно рабочего каталога backend/). В докере переопределяются env.
+  # Модель и токенизатор — СВЯЗАННАЯ ПАРА: веса привязаны к номерам токенов.
+  # Старый tokenizer.json (4 интента) переставляет номера относительно новой
+  # модели, поэтому их нельзя менять по отдельности. См. deploy/export-nlu-model.sh
   nlu:
     enabled: ${NLU_ENABLED:true}
-    model-path: ${NLU_MODEL_PATH:../ai_model/clinic_lm/models/model.onnx}
-    tokenizer-path: ${NLU_TOKENIZER_PATH:../ai_model/clinic_lm/models/tokenizer.json}
+    model-path: ${NLU_MODEL_PATH:models/nlu/model.onnx}
+    tokenizer-path: ${NLU_TOKENIZER_PATH:models/nlu/tokenizer_v2.json}
     context-length: ${NLU_CONTEXT_LENGTH:128}
     max-steps: ${NLU_MAX_STEPS:24}
 
@@ -45,6 +46,15 @@ app:
   voice:
     parser: ${VOICE_PARSER:nlu}
     max-exchanges: ${VOICE_MAX_EXCHANGES:5}
+
+  # Источник расписания: db — из таблицы doctors, excel — из файла .xlsx.
+  # Переключается одним флагом, код не меняется: за интерфейсом
+  # ScheduleProvider активна ровно одна реализация.
+  schedule:
+    source: ${SCHEDULE_SOURCE:db}
+    excel:
+      path: ${SCHEDULE_EXCEL_PATH:data/schedule.xlsx}
+      sheet: ${SCHEDULE_EXCEL_SHEET:}
 
   # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
   # Если модель не найдена или TTS_ENABLED=false — работает заглушка: звонящий слышит

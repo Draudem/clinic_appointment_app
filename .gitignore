@@ -42,3 +42,11 @@ deploy/tokens.txt
 lib/*.so
 lib/*.so.*
 deploy/libonnxruntime.so
+
+# Тестовое расписание Excel — генерируется командой ./gradlew genSchedule,
+# в репозитории ему не место: настоящий файл присылает поликлиника.
+data/
+
+# NLU-модель и токенизатор (~24 МБ) — в репозиторий не кладутся.
+# Собираются из исходников коллеги: deploy/export-nlu-model.sh
+models/nlu/

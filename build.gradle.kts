@@ -37,6 +37,11 @@ dependencies {
     // JNI-библиотека лежит внутри jar (native/linux-x64), тянет ~8 МБ.
     implementation("com.litongjava:sherpa-onnx-java-api:1.0.1")
 
+    // Apache POI — чтение расписания из Excel.
+    // Работает только при app.schedule.source=excel; при source=db файл не читается.
+    implementation("org.apache.poi:poi:5.4.1")
+    implementation("org.apache.poi:poi-ooxml:5.4.1")
+
     // JWT
     implementation("io.jsonwebtoken:jjwt-api:0.12.6")
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")
@@ -48,4 +53,17 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+
+/**
+ * Генерация тестового файла расписания Excel:
+ *   ./gradlew genSchedule
+ * Затем включить источник: SCHEDULE_SOURCE=excel
+ */
+tasks.register<JavaExec>("genSchedule") {
+    group = "verification"
+    description = "Создать тестовое расписание Excel (data/schedule.xlsx)"
+    mainClass.set("com.clinic.backend.support.ScheduleExcelGenerator")
+    classpath = sourceSets["main"].runtimeClasspath
 }

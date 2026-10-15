@@ -88,6 +88,36 @@ public class OnnxNluModel implements NluModel {
         this.session = env.createSession(modelPath.toString(), new OrtSession.SessionOptions());
         Set<String> names = session.getInputNames();
         inputName = names.iterator().next();
+
+        // Проверяем, что токенизатор соответствует модели. Модель и словарь связаны
+        // номерами токенов: если взять новый ONNX со старым токенизатором, бэкенд
+        // будет молча кодировать и декодировать не те токены — исключения не будет,
+        // будет просто «модель стала глупее». Поэтому отсутствие интентов ловим здесь.
+        List<String> absentIntents = FrameVocab.INTENTS.stream()
+                .filter(t -> tokenizer.idOf(t) < 0)
+                .toList();
+        if (absentIntents.isEmpty()) {
+            log.info("Словарь интентов совпадает с моделью ({})", FrameVocab.INTENTS.size());
+        } else {
+            log.error("В токенизаторе нет интентов {} — он не соответствует модели. "
+                            + "Проверьте NLU_TOKENIZER_PATH: для этой модели нужен tokenizer_v2, "
+                            + "старый tokenizer.json переставляет номера токенов.",
+                    absentIntents);
+        }
+
+        // Сверяем словарь времени с моделью. Если модель умеет выдавать
+        // токен, которого нет в FrameVocab, он будет замаскирован при декодировании
+        // и модель подставит другое значение (например, другое время). Ловим это
+        // на старте, а не по жалобам пациентов.
+        java.util.List<String> unsupported = FrameVocab.unsupportedTimeTokens(tokenizer.vocab().keySet());
+        if (unsupported.isEmpty()) {
+            log.info("Словарь времени совпадает с моделью ({} токенов)", FrameVocab.TIME_OF_DAY.size());
+        } else {
+            log.warn("Модель умеет {} токенов времени, которых нет в FrameVocab — "
+                    + "они будут замаскированы, время может разъезжаться: {}",
+                    unsupported.size(), unsupported);
+        }
+
         log.info("NLU-модель загружена: {} (вход '{}', vocab {}, ctx {})",
                 modelPath.getFileName(), inputName, vocabSize, contextLength);
 

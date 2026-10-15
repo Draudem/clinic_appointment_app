@@ -93,6 +93,72 @@ public class ClinicalKnowledgeBase {
         return NLU_TOKEN_TO_SPECIALTY.get(token);
     }
 
+    /**
+     * Основы слов, которые однозначно называют ВРАЧА, а не симптом.
+     *
+     * Отличие от {@link #SYNONYMS} принципиальное: там есть и болезни
+     * («кашель», «давление»), и здесь их быть не должно. Этот список
+     * используется как предохранитель, когда модель отказалась понимать фразу,
+     * и цена ошибки здесь — решить, что пациент хочет записаться. Лучше
+     * не сработать, чем записать не туда.
+     */
+    public static final Map<String, List<String>> DESIGNATION_STEMS = new LinkedHashMap<>();
+
+    static {
+        DESIGNATION_STEMS.put("Терапевт", List.of("терапевт"));
+        DESIGNATION_STEMS.put("Стоматолог", List.of("стоматолог", "дантист", "зубн"));
+        DESIGNATION_STEMS.put("Офтальмолог", List.of("офтальмолог", "окулист"));
+        DESIGNATION_STEMS.put("ЛОР", List.of("лор", "отоларинголог"));
+        DESIGNATION_STEMS.put("Невролог", List.of("невролог", "невропатолог"));
+        DESIGNATION_STEMS.put("Хирург", List.of("хирург"));
+        DESIGNATION_STEMS.put("Дерматолог", List.of("дерматолог", "кожник"));
+        DESIGNATION_STEMS.put("Эндокринолог", List.of("эндокринолог"));
+        DESIGNATION_STEMS.put("Гинеколог", List.of("гинеколог"));
+        DESIGNATION_STEMS.put("Уролог", List.of("уролог"));
+        DESIGNATION_STEMS.put("Педиатр", List.of("педиатр"));
+        DESIGNATION_STEMS.put("Ортопед", List.of("ортопед"));
+        DESIGNATION_STEMS.put("Психолог", List.of("психолог"));
+        DESIGNATION_STEMS.put("Кардиолог", List.of("кардиолог"));
+    }
+
+    /** Длина окончания, которую ещё считаем тем же словом: «терапевтУ», «лорОМ». */
+    private static final int SUFFIX_SLACK = 4;
+
+    /**
+     * Специальность, если пациент СЛОВОМ назвал врача: «к терапевту»,
+     * «к лору», «к дантисту».
+     *
+     * Сравнение по началу слова, а не {@code contains} как в
+     * {@link #recommendSpecialty}: там подстрока ищется где угодно внутри фразы
+     * и специальность «Кардиолог» находится в слове «кардиологическое» или даже
+     * в чужом слове про погоду. Здесь слово вырезается целиком, окончание вида
+     * «-ому/а/ом» допускается, а хвост длиннее {@value #SUFFIX_SLACK} букв —
+     * уже другое слово.
+     *
+     * Возвращает null, если врач не назван явно.
+     */
+    public static String specialtyByDesignation(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        String q = normalize(text).replace('ё', 'е');
+        for (String word : q.split("[^а-яa-z]+")) {
+            if (word.isEmpty()) {
+                continue;
+            }
+            for (Map.Entry<String, List<String>> e : DESIGNATION_STEMS.entrySet()) {
+                for (String stem : e.getValue()) {
+                    if (word.length() >= stem.length()
+                            && word.length() - stem.length() <= SUFFIX_SLACK
+                            && word.startsWith(stem)) {
+                        return e.getKey();
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     /** Все чанки базы знаний (БД + инструкции). */
     public List<KnowledgeChunk> chunks() {
         List<KnowledgeChunk> chunks = new ArrayList<>();

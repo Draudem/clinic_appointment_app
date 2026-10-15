@@ -52,13 +52,13 @@ public class VoiceController {
     @PostMapping("/command")
     @Operation(summary = "Начать диалог записи (текст)")
     public VoiceReply command(Authentication auth, @Valid @RequestBody VoiceTextRequest request) {
-        return dialogue.handle(auth.getName(), request.sessionId(), request.text());
+        return dialogue.handleForApi(auth.getName(), request.sessionId(), request.text());
     }
 
     @PostMapping("/answer")
     @Operation(summary = "Продолжить диалог записи (уточнение или подтверждение)")
     public VoiceReply answer(Authentication auth, @Valid @RequestBody VoiceTextRequest request) {
-        return dialogue.handle(auth.getName(), request.sessionId(), request.text());
+        return dialogue.handleForApi(auth.getName(), request.sessionId(), request.text());
     }
 
     @PostMapping(value = "/audio", consumes = "multipart/form-data")
@@ -68,7 +68,7 @@ public class VoiceController {
                             @RequestParam("audio") org.springframework.web.multipart.MultipartFile audio) {
         try {
             String text = speechToText.transcribe(audio.getBytes(), audio.getContentType());
-            return dialogue.handle(auth.getName(), sessionId, text);
+            return dialogue.handleForApi(auth.getName(), sessionId, text);
         } catch (java.io.IOException e) {
             throw new SpeechToTextException("Не удалось прочитать аудио: " + e.getMessage());
         }

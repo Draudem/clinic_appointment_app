@@ -40,18 +40,44 @@ public class NluCommandParser implements CommandParser {
                 engine = "nlu+rag";
             }
         }
+
+        String intent = frame.intent();
+        boolean unsupported = frame.unsupported();
+
+        // --- предохранитель намерения ------------------------------------
+        // Замеренная регрессия новой модели: на короткие ответы врачу —
+        // ровно то, что пациент говорит в ответ на вопрос ассистента —
+        // она отвечает <UNSUPPORTED>: «к терапевту», «к стоматологу»,
+        // «к лору», «к зубному». Старая модель такие фразы разбирала.
+        // Без этого сценарий записи зацикливается: ассистент спрашивает
+        // специальность, пациент отвечает «к лору», ассистент спрашивает
+        // снова — до лестницы R-05 и перевода оператору.
+        // Спасает слово, которым пациент НАЗВАЛ врача. Только такое:
+        //   «какая завтра погода», «закажи пиццу»  — врача не назвали, мимо
+        //   «работает ли сегодня хирург»           — вопрос о графике,
+        //     его раньше перехватывает ScheduleInfoRule, сюда не доходит
+        if (unsupported) {
+            String byName = ClinicalKnowledgeBase.specialtyByDesignation(text);
+            if (byName != null) {
+                specialty = byName;
+                intent = "<BOOK>";
+                unsupported = false;
+                engine = "nlu+предохранитель";
+            }
+        }
+
         List<String> symptoms = new ArrayList<>();
         for (String s : frame.symptoms()) {
             symptoms.add(s.replace("<SYMPTOM_", "").replace(">", "").toLowerCase());
         }
         return new ParsedCommand(
-                frame.intent(),
+                intent,
                 specialty,
                 frame.timeFactors(),
                 symptoms,
                 frame.timeUnknown(),
                 frame.needsClarification(),
-                frame.unsupported(),
+                unsupported,
                 frame.frame(),
                 engine);
     }

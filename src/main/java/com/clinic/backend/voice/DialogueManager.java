@@ -1,347 +1,246 @@
 package com.clinic.backend.voice;
 
-import com.clinic.backend.appointment.AppointmentService;
-import com.clinic.backend.doctor.Doctor;
-import com.clinic.backend.doctor.DoctorRepository;
-import com.clinic.backend.rag.ClinicalKnowledgeBase;
+import com.clinic.backend.identity.PatientIdentity;
+import com.clinic.backend.identity.PatientIdentityResolver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDate;
-import java.util.ArrayList;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeSet;
 
 /**
- * Ведёт диалог записи: разбирает реплику, добирает недостающее, проверяет
- * реальное расписание и предлагает действие. Запись/отмена выполняется ТОЛЬКО
- * после явного подтверждения пациента (этап PENDING_CONFIRMATION). Держит лимит
- * обменов (по умолчанию 5) — после него диалог передаётся оператору (заглушка).
+ * Фасад диалога: держит сессию, определяет личность пациента и передаёт ход
+ * в сценарий {@link BookingFlow}.
  *
- * Каждый этап (парсер, подбор слота, запись) вынесен в отдельный бин, поэтому
- * любой из них можно заменить, не трогая логику диалога.
+ * Класс намеренно тонкий. Вся логика записи — в сценарии, вся «математика
+ * времени» — в {@link TimeResolver}, подбор слота — в {@link SlotResolver},
+ * разбор реплики — в {@link CommandParser}, расписание — за портом
+ * {@link com.clinic.backend.schedule.ScheduleProvider}. Замена любого из них
+ * на заглушку или на более сильную модель не требует правок здесь.
+ *
+ * Три входа — HTTP (/api/voice/command), телефон (AudioSocket) и мобильное
+ * приложение — обслуживаются одними и теми же методами, поэтому сценарий
+ * не может «разойтись» между каналами.
  */
 @Service
 public class DialogueManager {
 
-    private final CommandParser parser;
-    private final RuleCommandParser timeHintParser;
-    private final SlotResolver slotResolver;
-    private final AppointmentService appointments;
+    private static final Logger log = LoggerFactory.getLogger(DialogueManager.class);
+
+    private final BookingFlow flow;
     private final DialogueSessionRepository sessions;
-    private final DoctorRepository doctors;
+    private final PatientIdentityResolver identity;
     private final VoiceProperties props;
 
-    public DialogueManager(CommandParser parser,
-                           RuleCommandParser timeHintParser,
-                           SlotResolver slotResolver,
-                           AppointmentService appointments,
+    public DialogueManager(BookingFlow flow,
                            DialogueSessionRepository sessions,
-                           DoctorRepository doctors,
+                           PatientIdentityResolver identity,
                            VoiceProperties props) {
-        this.parser = parser;
-        this.timeHintParser = timeHintParser;
-        this.slotResolver = slotResolver;
-        this.appointments = appointments;
+        this.flow = flow;
         this.sessions = sessions;
-        this.doctors = doctors;
+        this.identity = identity;
         this.props = props;
     }
 
+    // ------------------------------------------------------------------
+    // Телефон
+    // ------------------------------------------------------------------
+
+    /**
+     * Начало телефонного звонка: обнуляем состояние прошлого разговора.
+     *
+     * Идентификатор звонка у Asterisk может повторяться (переподключение, повторный
+     * дозвон с того же транка). Без сброса новый звонок продолжал старый: лимит
+     * обменов копился, и через несколько неудачных попыток ассистент переводил
+     * в оператора уже на первой фразе.
+     */
     @Transactional
-    public VoiceReply handle(String login, Long sessionId, String text) {
-        DialogueSession session = sessionId == null
-                ? new DialogueSession(login)
-                : sessions.findById(sessionId).orElseGet(() -> new DialogueSession(login));
-
-        session.append("пациент", text);
-        session.incrementExchanges();
-
-        // Лимит обменов -> оператор
-        if (session.getExchanges() > props.getMaxExchanges() || session.isHandedOff()) {
-            session.setHandedOff(true);
-            session.setStage("OPERATOR");
-            String reply = "Передаю вас оператору — он продолжит запись. Это диалог №"
-                    + session.getId() + ".";
-            session.append("ассистент", reply);
-            sessions.save(session);
-            return build(session, reply, List.of(), null, null, true, false, "(оператор)", "operator");
+    public void startCall(String callKey, String ani) {
+        DialogueSession session = sessions.findByCallKey(callKey).orElse(null);
+        if (session == null) {
+            session = new DialogueSession("");
+            session.setCallKey(callKey);
         }
+        session.setCallerPhone(ani);
+        session.resetForNewCall();
+        session.touch();
+        sessions.save(session);
+    }
 
-        ParsedCommand parsed = parser.parse(text);
-        // NLU-модель работает с целыми фразами; короткие уточнения («в пятницу»,
-        // «в 15:00») она может не разобрать. Тогда добираем время из rule-парсера.
-        if (parsed.timeFactors().isEmpty()) {
-            ParsedCommand hint = timeHintParser.parse(text);
-            if (!hint.timeFactors().isEmpty()) {
-                parsed = mergeTime(parsed, hint);
-            }
+    /**
+     * Ход телефонного разговора.
+     *
+     * Сессия ищется по ключу звонка, поэтому несколько фраз подряд ведут
+     * один диалог. Номер звонящего — только дополнительный признак для
+     * идентификации, никогда единственный (регламент 3.5).
+     */
+    @Transactional
+    public Turn handleByCall(String callKey, String ani, String text) {
+        DialogueSession session = sessions.findByCallKey(callKey).orElseGet(() -> {
+            DialogueSession s = new DialogueSession("");
+            s.setCallKey(callKey);
+            s.setCallerPhone(ani);
+            return s;
+        });
+        if (ani != null && !ani.isBlank() && !ani.equals(session.getCallerPhone())) {
+            session.setCallerPhone(ani);
         }
-
-        // --- Этап подтверждения предложенного действия ---
-        if ("PENDING_CONFIRMATION".equals(session.getStage()) && session.getPendingAction() != null) {
-            Confirm answer = confirm(text);
-            if (answer == Confirm.NO) {
-                session.clearPending();
-                session.setStage("COLLECTING_TIME");
-                String reply = "Хорошо, не подтверждаю. Назовите другую дату/время "
-                        + "или другую специальность.";
-                session.append("ассистент", reply);
-                sessions.save(session);
-                return build(session, reply, List.of(), null, null, false, false,
-                        session.getPendingFrame(), "confirm-no");
-            }
-            if (answer == Confirm.YES) {
-                return executePending(session, login);
-            }
-            // Ответ не распознан как да/нет. Если пациент назвал новую информацию
-            // (специальность/время) — обрабатываем её как новую команду.
-            boolean newInfo = parsed.hasSpecialty() || !parsed.timeFactors().isEmpty();
-            if (!newInfo) {
-                String reply = "Пожалуйста, подтвердите: " + session.getPendingSummary()
-                        + ". Ответьте «да» или «нет».";
-                session.append("ассистент", reply);
-                sessions.save(session);
-                return build(session, reply, List.of(), null, proposalOf(session), false, false,
-                        session.getPendingFrame(), "confirm-reask");
-            }
-            session.clearPending();
+        session.touch();
+        // лимит обменов (защита от зацикливания) — до того, как что-то предпримем
+        if (session.getExchanges() > props.getMaxExchanges() && !session.isHandedOff()) {
+            return transferForLimit(session);
         }
+        Turn turn = flow.handle(session, whoFor(session, ani), text);
+        sessions.save(session);
+        return turn;
+    }
 
-        String specialty = parsed.hasSpecialty() ? parsed.specialty() : session.getSpecialty();
-        if (specialty != null && !specialty.isBlank()) {
-            session.setSpecialty(specialty);
+    /** Пациент заговорил — сбрасываем счётчик тишины. */
+    @Transactional
+    public Turn touchCall(String callKey) {
+        sessions.findByCallKey(callKey).ifPresent(DialogueSession::touch);
+        return Turn.continueWith(null, "WAITING", List.of(), 0);
+    }
+
+    /** Тишина в трубке. Реакция по правилу R-17. */
+    @Transactional
+    public Turn silence(String callKey) {
+        DialogueSession session = sessions.findByCallKey(callKey).orElse(null);
+        long seconds = session == null ? 0 : session.silentSeconds();
+        if (seconds < 5) {
+            return Turn.continueWith(null, "WAITING", List.of(), 0);
         }
+        if (seconds < 10) {
+            return Turn.continueWith("Вы меня слышите?", "WAITING", List.of(), 0);
+        }
+        session.setStage("CLOSED");
+        session.append("ассистент", "Вас не слышно. Перезвоните, пожалуйста.");
+        sessions.save(session);
+        return Turn.hangup("Вас не слышно. Перезвоните, пожалуйста.", "CLOSED", "DROPPED", 0);
+    }
 
-        String reply;
-        List<String> options = new ArrayList<>();
-        Map<String, Object> appointment = null;
-        Map<String, Object> proposal = null;
-        boolean needsClarification = false;
-        boolean unsupported = false;
-        String stage = session.getStage();
-        LocalDate today = LocalDate.now();
-
-        if ("CANCEL".equals(parsed.intent())) {
-            List<Map<String, Object>> mine = appointments.listFor(login, false);
-            TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), today);
-            Optional<Map<String, Object>> target = pickCancelTarget(mine, pref, today);
-            if (target.isEmpty()) {
-                reply = "У вас нет подходящих записей для отмены. "
-                        + "Список записей — в разделе «Мои записи».";
-                needsClarification = true;
-                stage = "COLLECTING_SPECIALTY";
-            } else {
-                Map<String, Object> a = target.get();
-                session.setPendingAction("CANCEL");
-                session.setPendingAppointmentId(((Number) a.get("id")).longValue());
-                String summary = "отмена записи: " + a.get("doctorName")
-                        + " (" + a.get("specialty") + "), " + a.get("date") + " в " + a.get("time");
-                session.setPendingSummary(summary);
-                session.setPendingFrame(parsed.frame());
-                session.setStage("PENDING_CONFIRMATION");
-                reply = "Подтвердите, пожалуйста, " + summary + ". Ответьте «да» или «нет».";
-                stage = "PENDING_CONFIRMATION";
-                proposal = proposalOf(session);
-            }
-        } else if (parsed.unsupported() && specialty == null) {
-            reply = "Я помогаю записаться к врачу. К какому специалисту вас записать? "
-                    + "Можно назвать симптом — например, «болит зуб».";
-            needsClarification = true;
-            unsupported = true;
-            stage = "COLLECTING_SPECIALTY";
-        } else if (specialty == null) {
-            reply = "К какому врачу хотите записаться? Назовите специальность или симптом.";
-            needsClarification = true;
-            stage = "COLLECTING_SPECIALTY";
-        } else if (!slotResolver.specialtyStaffed(specialty)) {
-            reply = "Специалиста «" + specialty + "» сейчас нет. Доступные направления: "
-                    + String.join(", ", availableSpecialties()) + ".";
-            needsClarification = true;
-            stage = "COLLECTING_SPECIALTY";
-        } else {
-            TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), today);
-            Optional<SlotResolver.Slot> slot = slotResolver.findSlot(specialty, pref, today);
-            if (slot.isPresent() && !parsed.timeFactors().isEmpty() && !parsed.timeUnknown()) {
-                SlotResolver.Slot s = slot.get();
-                // НЕ записываем сразу — сначала просим подтверждение.
-                session.setPendingAction("BOOK");
-                session.setPendingDoctorId(s.doctor().getId());
-                session.setPendingDate(s.date().toString());
-                session.setPendingTime(s.time());
-                session.setPendingSummary(s.doctor().getFio() + " (" + specialty + "), "
-                        + s.date() + " в " + s.time());
-                session.setPendingFrame(parsed.frame());
-                session.setStage("PENDING_CONFIRMATION");
-                reply = "Проверьте, пожалуйста: " + session.getPendingSummary()
-                        + ". Записываю? Ответьте «да» или «нет».";
-                stage = "PENDING_CONFIRMATION";
-                proposal = proposalOf(session);
-            } else {
-                reply = proposeSlots(specialty, today, options, parsed);
-                needsClarification = true;
-                stage = "COLLECTING_TIME";
+    /** Кто говорит по телефону: сначала ANI как подсказка, иначе — по названным данным. */
+    private PatientIdentity whoFor(DialogueSession session, String ani) {
+        if (session.getPatientLogin() != null && !session.getPatientLogin().isBlank()) {
+            return identity.findByLogin(session.getPatientLogin()).orElseGet(PatientIdentity::unknown);
+        }
+        if (ani != null && !ani.isBlank()) {
+            var byPhone = identity.findByPhone(ani);
+            if (byPhone.isPresent()) {
+                session.setPatientLogin(byPhone.get().login());
+                return byPhone.get();
             }
         }
+        return PatientIdentity.unknown();
+    }
 
-        session.setStage(stage);
+    // ------------------------------------------------------------------
+    // HTTP
+    // ------------------------------------------------------------------
+
+    @Transactional
+    public Turn handle(String login, Long sessionId, String text) {
+        DialogueSession session = resolveHttpSession(login, sessionId);
+        if (session.getExchanges() > props.getMaxExchanges() && !session.isHandedOff()) {
+            return transferForLimit(session);
+        }
+        Turn turn = flow.handle(session, whoForHttp(login), text);
+        sessions.save(session);
+        return turn;
+    }
+
+    /** Ход по HTTP с ответом в существующем контракте. */
+    @Transactional
+    public VoiceReply handleForApi(String login, Long sessionId, String text) {
+        DialogueSession session = resolveHttpSession(login, sessionId);
+        Turn turn = flow.handle(session, whoForHttp(login), text);
+        sessions.save(session);
+        return toReply(session, turn);
+    }
+
+    private DialogueSession resolveHttpSession(String login, Long sessionId) {
+        if (sessionId != null) {
+            var existing = sessions.findById(sessionId);
+            if (existing.isPresent()) {
+                return existing.get();
+            }
+        }
+        return new DialogueSession(login);
+    }
+
+    /** По HTTP пациент уже аутентифицирован: берём ФИО и дату рождения из реестра. */
+    private PatientIdentity whoForHttp(String login) {
+        if (login == null || login.isBlank()) {
+            return PatientIdentity.unknown();
+        }
+        return identity.findByLogin(login).orElseGet(PatientIdentity::unknown);
+    }
+
+    // ------------------------------------------------------------------
+    // Общее
+    // ------------------------------------------------------------------
+
+    private Turn transferForLimit(DialogueSession session) {
+        session.setHandedOff(true);
+        session.setStage("OPERATOR");
+        String reply = "Соединяю с сотрудником — суть вашего вопроса уже передана.";
         session.append("ассистент", reply);
         sessions.save(session);
-        return build(session, reply, options, appointment, proposal, false, unsupported,
-                parsed.frame(), parsed.engine());
+        return Turn.transfer(reply, "R-05", "ESCALATED", session.getMissCount());
     }
 
-    /** Выполнение подтверждённого действия (BOOK/CANCEL). */
-    private VoiceReply executePending(DialogueSession session, String login) {
-        String action = session.getPendingAction();
+    /** Превращает ход сценария в ответ существующего HTTP-контракта. */
+    VoiceReply toReply(DialogueSession session, Turn turn) {
         Map<String, Object> appointment = null;
-        String reply;
-        if ("CANCEL".equals(action)) {
-            Long appointmentId = session.getPendingAppointmentId();
-            try {
-                appointments.cancel(login, appointmentId, false);
-                reply = "Готово: запись отменена.";
-                session.setStage("CONFIRMED");
-            } catch (RuntimeException e) {
-                reply = "Не удалось отменить запись: " + e.getMessage();
-                session.setStage("COLLECTING_TIME");
-            }
-        } else {
-            try {
-                appointment = appointments.book(login, session.getPendingDoctorId(),
-                        LocalDate.parse(session.getPendingDate()), session.getPendingTime());
-                reply = "Готово! Записал вас: " + appointment.get("doctorName") + " ("
-                        + appointment.get("specialty") + "), " + appointment.get("date")
-                        + " в " + appointment.get("time") + ".";
-                session.setStage("CONFIRMED");
-            } catch (RuntimeException e) {
-                reply = "Не получилось записать: " + e.getMessage()
-                        + " Давайте выберем другое время.";
-                session.setStage("COLLECTING_TIME");
-            }
+        if ("BOOKED".equals(turn.resultCode()) || "RESCHEDULED".equals(turn.resultCode())) {
+            appointment = bookedAppointment(session);
         }
-        session.clearPending();
-        session.append("ассистент", reply);
-        sessions.save(session);
-        return build(session, reply, List.of(), appointment, null, false, false,
-                "(подтверждено)", "confirm-yes");
-    }
-
-    private String proposeSlots(String specialty, LocalDate today, List<String> options, ParsedCommand parsed) {
-        List<Doctor> docs = doctors.findBySpecialty(specialty);
-        String lead = parsed.timeFactors().isEmpty() || parsed.timeUnknown()
-                ? "На какую дату и время записать? "
-                : "На это время свободного приёма нет. ";
-        for (Doctor d : docs) {
-            for (SlotResolver.Slot s : slotResolver.upcomingSlots(d, today, 14)) {
-                options.add(s.date() + " " + s.time() + " — " + d.getFio());
-                if (options.size() >= 3) {
-                    break;
-                }
-            }
-            if (options.size() >= 3) {
-                break;
-            }
-        }
-        if (options.isEmpty()) {
-            return lead + "Свободных приёмов у «" + specialty + "» в ближайшие 2 недели нет.";
-        }
-        return lead + "Свободные варианты: " + String.join("; ", options) + ".";
-    }
-
-    private Optional<Map<String, Object>> pickCancelTarget(List<Map<String, Object>> mine,
-                                                           TimeResolver.TimePreference pref,
-                                                           LocalDate today) {
-        String wanted = pref.date() == null ? null : pref.date().toString();
-        for (Map<String, Object> a : mine) {
-            if (!"CONFIRMED".equals(a.get("status"))) {
-                continue;
-            }
-            String date = String.valueOf(a.get("date"));
-            if (date.compareTo(today.toString()) < 0) {
-                continue;
-            }
-            if (wanted != null && !wanted.equals(date)) {
-                continue;
-            }
-            return Optional.of(a);
-        }
-        return Optional.empty();
-    }
-
-    private List<String> availableSpecialties() {
-        TreeSet<String> names = new TreeSet<>();
-        for (Doctor d : doctors.findAll()) {
-            names.add(d.getSpecialty());
-        }
-        return new ArrayList<>(names);
-    }
-
-    private Map<String, Object> proposalOf(DialogueSession session) {
         Map<String, Object> proposal = new LinkedHashMap<>();
-        proposal.put("action", session.getPendingAction());
-        proposal.put("summary", session.getPendingSummary());
-        proposal.put("doctorId", session.getPendingDoctorId());
-        proposal.put("date", session.getPendingDate());
-        proposal.put("time", session.getPendingTime());
-        proposal.put("appointmentId", session.getPendingAppointmentId());
-        return proposal;
-    }
-
-    private ParsedCommand mergeTime(ParsedCommand base, ParsedCommand hint) {
-        return new ParsedCommand(base.intent(), base.specialty(), hint.timeFactors(),
-                base.symptoms(), false, base.needsClarification(), base.unsupported(),
-                base.frame(), base.engine() + "+rule-time");
-    }
-
-    private VoiceReply build(DialogueSession session, String reply, List<String> options,
-                             Map<String, Object> appointment, Map<String, Object> proposal,
-                             boolean handedOff, boolean unsupported,
-                             String frame, String engine) {
-        return new VoiceReply(session.getId(), reply, session.getStage(),
-                !handedOff && session.getStage().startsWith("COLLECTING"),
-                unsupported, handedOff, options, appointment, proposal,
-                session.getExchanges(), props.getMaxExchanges(), frame, engine);
-    }
-
-    private enum Confirm { YES, NO, UNKNOWN }
-
-    private static final Set<String> YES_WORDS = Set.of(
-            "да", "ага", "угу", "ок", "окей", "хорошо", "верно", "подтверждаю",
-            "правильно", "согласен", "согласна", "yes", "y", "+", "так точно",
-            "все верно", "всё верно", "конечно");
-
-    private static final Set<String> NO_WORDS = Set.of(
-            "нет", "неверно", "не надо", "не нужно", "не хочу", "отмена", "отменить",
-            "отказ", "стоп", "no", "n", "-", "не то", "другое");
-
-    private static Confirm confirm(String text) {
-        String q = ClinicalKnowledgeBase.normalize(text)
-                .replaceAll("[^\\p{L}\\p{N}+\\- ]", " ")
-                .replaceAll("\\s+", " ")
-                .trim();
-        for (String w : NO_WORDS) {
-            if (matches(q, w)) {
-                return Confirm.NO;
-            }
+        if (session.getPendingDoctorId() != null) {
+            proposal.put("action", session.getPendingAction());
+            proposal.put("doctorId", session.getPendingDoctorId());
+            proposal.put("date", session.getPendingDate());
+            proposal.put("time", session.getPendingTime());
+            proposal.put("cabinet", session.getPendingCabinet());
+            proposal.put("appointmentId", session.getPendingAppointmentId());
+            proposal.put("summary", session.getPendingSummary());
         }
-        for (String w : YES_WORDS) {
-            if (matches(q, w)) {
-                return Confirm.YES;
-            }
-        }
-        return Confirm.UNKNOWN;
+        List<String> options = turn.options().stream().map(Turn.Slot::spoken).toList();
+        return new VoiceReply(session.getId(), turn.reply(), turn.stage(),
+                turn.action() == Turn.Action.CONTINUE,
+                false, turn.action() == Turn.Action.TRANSFER,
+                options, appointment, proposal,
+                session.getExchanges(), props.getMaxExchanges(),
+                session.getPendingFrame(), "booking-flow");
     }
 
-    /** Короткие слова (да/нет/+-) сравниваем целиком, чтобы не путать с подстроками. */
-    private static boolean matches(String q, String word) {
-        if (word.length() <= 2) {
-            return q.equals(word);
+    /** Последняя созданная запись пациента — для ответа «вы записаны». */
+    private Map<String, Object> bookedAppointment(DialogueSession session) {
+        if (session.getPatientLogin() == null || session.getPatientLogin().isBlank()) {
+            return null;
         }
-        return q.equals(word) || q.contains(word);
+        return flow.lastBooking(session.getPatientLogin());
+    }
+
+    /** Удаляет стенограммы старше срока хранения (раздел 8 регламента: не более 90 дней). */
+    @Transactional
+    public int purgeExpiredTranscripts() {
+        var expired = sessions.findByExpiresAtBefore(java.time.Instant.now());
+        for (DialogueSession s : expired) {
+            sessions.delete(s);
+        }
+        if (!expired.isEmpty()) {
+            log.info("Удалено стенограмм по истечении срока хранения: {}", expired.size());
+        }
+        return expired.size();
+    }
+
+    /** Сколько тишины в трубке — для диагностики звонка. */
+    public static Duration silentFor(DialogueSession session) {
+        return Duration.ofSeconds(session.silentSeconds());
     }
 }

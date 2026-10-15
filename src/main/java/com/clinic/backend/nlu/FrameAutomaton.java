@@ -30,15 +30,7 @@ public class FrameAutomaton {
 
     private Map<Integer, String> buildTokenById(Map<String, Integer> idOf) {
         Map<Integer, String> map = new java.util.HashMap<>();
-        List<String> all = new ArrayList<>();
-        all.addAll(FrameVocab.INTENTS);
-        all.addAll(FrameVocab.SPECIALTIES);
-        all.addAll(FrameVocab.SYMPTOMS);
-        all.addAll(List.of("<T_UNKNOWN>", "<TIME>", "</TIME>", "<NEEDS_CLARIFICATION>", "<END_FRAME>", "<EOS>"));
-        all.addAll(FrameVocab.TIME_SCOPE);
-        all.addAll(FrameVocab.TIME_DAY);
-        all.addAll(FrameVocab.TIME_OF_DAY);
-        for (String t : all) {
+        for (String t : FrameVocab.allFrameTokens()) {
             Integer id = idOf.get(t);
             if (id != null) {
                 map.put(id, t);
@@ -113,7 +105,9 @@ public class FrameAutomaton {
             return;
         }
         state = switch (state) {
-            case INTENT -> tok.equals("<UNSUPPORTED>") ? S.END_FRAME : S.SPECIALTY;
+            // «пустые» интенты (UNSUPPORTED, голые да/нет) сразу заканчивают фрейм:
+            // тянуть за ними специальность бессмысленно — её в ответе нет
+            case INTENT -> FrameVocab.BARE_INTENTS.contains(tok) ? S.END_FRAME : S.SPECIALTY;
             case SPECIALTY -> S.TIME;
             case TIME -> tok.equals("<T_UNKNOWN>") ? S.SYMPTOMS : S.FACTORS;
             case FACTORS -> {

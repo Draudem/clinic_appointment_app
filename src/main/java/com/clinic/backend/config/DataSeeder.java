@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.List;
@@ -41,6 +42,50 @@ public class DataSeeder {
                 log.info("Создан администратор admin/admin123 (Иван Админов)");
             }
         };
+    }
+
+    /**
+     * Демонстрационные пациенты.
+     *
+     * Нужны для сценария С-01: по регламенту 3.5 запись выполняется только
+     * после идентификации по ФИО и дате рождения. Пока реестр пациентов не
+     * наполняется подразделениями, любой телефонный звонок ушёл бы на
+     * перевод к оператору (R-07) и сценарий было бы нечего показать.
+     *
+     * Это ЗАГЛУШКА реестра, а не обход идентификации: подтверждение по ФИО и ДР
+     * работает ровно так же, как на боевых данных. Когда появится настоящий
+     * реестр, достаточно выключить этот наполнитель (SEED_PATIENTS=false).
+     */
+    @Bean
+    ApplicationRunner seedPatients(UserRepository users, PasswordEncoder encoder,
+                                    org.springframework.core.env.Environment env) {
+        return args -> {
+            boolean enabled = !"false".equalsIgnoreCase(env.getProperty("app.seed-patients", "true"));
+            if (!enabled) {
+                return;
+            }
+            seedPatient(users, encoder, "smirnova", "smirnova", "Ольга", "Викторовна",
+                    "Смирнова", "1978-03-12", "+79001234567");
+            seedPatient(users, encoder, "petrov", "petrov", "Игорь", "Николаевич",
+                    "Петров", "1962-05-05", "+79007654321");
+            seedPatient(users, encoder, "ivanov", "ivanov", "Сергей", "Петрович",
+                    "Иванов", "1990-01-03", "+79005554433");
+        };
+    }
+
+    private static void seedPatient(UserRepository users, PasswordEncoder encoder,
+                                    String login, String password, String first, String patronymic,
+                                    String last, String birthDate, String phone) {
+        if (users.existsByLogin(login)) {
+            return;
+        }
+        User u = new User(login, encoder.encode(password), Role.PATIENT, first, last);
+        u.setPatronymic(patronymic);
+        u.setBirthDate(java.time.LocalDate.parse(birthDate));
+        u.setPhone(phone);
+        users.save(u);
+        log.info("Создан пациент {} ({}, {}, {}) для проверки сценария С-01",
+                login, last, first, birthDate);
     }
 
     @Bean

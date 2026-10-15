@@ -1,5 +1,7 @@
 package com.clinic.backend.stt;
 
+import com.clinic.backend.voice.CallDialogueService;
+import com.clinic.backend.voice.Turn;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -77,6 +79,7 @@ public class AsteriskAudioSocketServer implements Runnable {
     private final SttProperties props;
     private final TtsProperties ttsProps;
     private final TranscriptStore transcriptStore;
+    private final CallDialogueService dialogue;
 
     private ServerSocket serverSocket;
     private final ExecutorService workers = Executors.newCachedThreadPool(r -> {
@@ -91,12 +94,14 @@ public class AsteriskAudioSocketServer implements Runnable {
                                      ReplySynthesizer synthesizer,
                                      SttProperties props,
                                      TtsProperties ttsProps,
-                                     TranscriptStore transcriptStore) {
+                                     TranscriptStore transcriptStore,
+                                     CallDialogueService dialogue) {
         this.recognizer = recognizer;
         this.synthesizer = synthesizer;
         this.props = props;
         this.ttsProps = ttsProps;
         this.transcriptStore = transcriptStore;
+        this.dialogue = dialogue;
     }
 
     /** Поднимает порт. Ошибка bind не должна ронять весь бэкенд — ловим и логируем. */
@@ -169,7 +174,11 @@ public class AsteriskAudioSocketServer implements Runnable {
             // а поток чтения ниже продолжает принимать и распознавать речь клиента —
             // в том числе пока ассистент говорит.
             voice = new CallVoice(out, synthesizer);
-            voice.enqueue(ttsProps.getGreeting());
+            // Состояние диалога обнуляется, когда придёт настоящий UUID звонка:
+            // до этого момента callUuid ещё временный («call-N»), и если сбросить
+            // по нему, сценарий потом цепляется к сессии ПРОШЛОГО звонка с тем же
+            // UUID — пациент остаётся «найденным» без называния ФИО.
+            voice.enqueue(dialogue.greeting());
             log.info("Звонок #{}: озвучено приветствие, синтез {}", callId, synthesizer.name());
 
             while (running) {
@@ -195,6 +204,8 @@ public class AsteriskAudioSocketServer implements Runnable {
                     case TYPE_UUID -> {
                         if (payload.length == 16) {
                             callUuid = new UUID(bytesToLong(payload, 0), bytesToLong(payload, 8)).toString();
+                            // настоящий идентификатор звонка получен — начинаем диалог с чистого листа
+                            dialogue.onCallStarted(callUuid, callerPhone(socket));
                         }
                         log.info("Звонок #{}: UUID {}", callId, callUuid);
                     }
@@ -213,16 +224,30 @@ public class AsteriskAudioSocketServer implements Runnable {
                                 // Фраза клиента. Распознаём и пишем текст ВСЕГДА,
                                 // в том числе пока ассистент ещё договаривает.
                                 String said = flushUtterance(callId, callUuid, segmenter, minSamples);
-                                if (said != null && !said.isBlank() && !answered) {
-                                    // Первая распознанная фраза — отвечаем и завершаем звонок.
+                                if (said != null && !said.isBlank()) {
+                                    // Реплика пациента уходит в сценарий С-01, тот решает,
+                                    // что сказать и когда закончить. Здесь НЕТ логики записи:
+                                    // раньше на первую фразу сервер отвечал «Спасибо, записываю»
+                                    // и вешал трубку независимо от услышанного.
+                                    Turn turn = dialogue.onUtterance(callUuid, said, callerPhone(socket));
                                     answered = true;
-                                    voice.enqueue(ttsProps.getReplyOnSilence());
-                                    log.info("Звонок #{}: отвечаем «{}» и ждём окончания озвучки",
-                                            callId, ttsProps.getReplyOnSilence());
-                                    voice.awaitFinished(30);
-                                    sleepQuietly(ttsProps.getCloseDelaySeconds() * 1000L);
-                                    log.info("Звонок #{}: фраза дозвучала, закрываем соединение", callId);
-                                    return;
+                                    if (turn != null && turn.reply() != null
+                                            && !turn.reply().isBlank()) {
+                                        voice.enqueue(turn.reply());
+                                        log.info("Звонок #{}: этап={} действие={} — озвучиваем ответ",
+                                                callId, turn.stage(), turn.action());
+                                    }
+                                    if (turn != null && turn.action() != Turn.Action.CONTINUE) {
+                                        // Даём фразе дозвучать и только потом закрываем сокет.
+                                        // Раньше здесь была фиксированная пауза в 2 секунды,
+                                        // из-за чего конец фразы обрывался.
+                                        voice.awaitFinished(60);
+                                        voice.close();
+                                        sleepQuietly(ttsProps.getCloseDelaySeconds() * 1000L);
+                                        log.info("Звонок #{}: сценарий завершён ({}), закрываем соединение",
+                                                callId, turn.action());
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -251,6 +276,17 @@ public class AsteriskAudioSocketServer implements Runnable {
             log.info("Звонок #{} завершён, распознано фраз: {}", callId,
                     transcriptStore.countFor(callUuid));
         }
+    }
+
+    /** Номер звонящего для идентификации — из удалённого адреса сокета. */
+    private static String callerPhone(Socket socket) {
+        if (socket == null || !(socket.getRemoteSocketAddress() instanceof
+                java.net.InetSocketAddress inet)) {
+            return null;
+        }
+        String host = inet.getAddress() == null ? inet.getHostName()
+                : inet.getAddress().getHostAddress();
+        return host == null ? null : host;
     }
 
     private static void sleepQuietly(long millis) {
