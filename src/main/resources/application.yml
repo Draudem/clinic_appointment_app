@@ -91,19 +91,22 @@ app:
     # Каталог с файлами модели GigaAM (model.int8.onnx + tokens.txt)
     model-dir: ${STT_MODEL_DIR:models/stt/sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19}
     num-threads: ${STT_NUM_THREADS:2}
+    min-utterance-seconds: 0.3
     # Пауза тишины, которая считается концом фразы (секунды)
     # Пауза, которой мы ждём конца фразы. 1,2 с было с запасом; замер показал,
     # что весь этот запас уходит в тишину: пациент замолчал — и мы молчим ещё
     # секунду с лишним, прежде чем распознать. 0,8 — минимум, при котором
     # пауза внутри фразы («в пятницу… в девять») не разрезает её на части.
-    silence-seconds: ${STT_SILENCE_SECONDS:0.6}
+    silence-seconds: ${STT_SILENCE_SECONDS:0.8}
     # Максимальная длина одной фразы, после неё форсируем распознавание (секунды)
     max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:6}
-    silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.03}
+    silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.012}
     # Отдавать ли распознанный текст обратно в сокет.
     # true  -> синтез речи TTS и отправка аудио (0x10) обратно в Asterisk;
     # false -> в сокет уходит только тишина, текст забирают по HTTP (режим заглушки).
     speak-replies: ${STT_SPEAK_REPLIES:false}
+
+
 
   # LLM-этап (задел под Ollama / OpenAI-совместимый API). По умолчанию выключен:
   # на текущем сервере Ollama не помещается вместе с Postgres и JVM.
