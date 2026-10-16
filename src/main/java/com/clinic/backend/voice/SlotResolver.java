@@ -106,7 +106,16 @@ public class SlotResolver {
         if (from.isBefore(today)) {
             from = today;
         }
+        // Горизонт отсчитывается от СЕГОДНЯ, а не от названной даты. Раньше окно
+        // просто сдвигалось: пациент называл дату через полгода — и мы предлагали
+        // запись на неё, хотя поликлиника открывает расписание на 14 дней вперёд.
+        // На живом звонке так в запись-подтверждение уехала дата рождения
+        // («двенадцатое марта») — запись предлагалась на март следующего года.
         LocalDate to = from.plusDays(HORIZON_DAYS - 1);
+        LocalDate maxDate = today.plusDays(HORIZON_DAYS - 1);
+        if (to.isAfter(maxDate)) {
+            to = maxDate;
+        }
 
         TimeResolver.TimePreference p = pref == null
                 ? new TimeResolver.TimePreference(null, null, null, null, null, false, "")

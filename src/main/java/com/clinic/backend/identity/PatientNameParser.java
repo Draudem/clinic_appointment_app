@@ -217,9 +217,26 @@ public final class PatientNameParser {
     // Дата рождения
     // ------------------------------------------------------------------
 
-    /** Дата рождения из реплики. */
+    /**
+     * Дата рождения из реплики.
+     *
+     * <p>К прежней версии две претензии, обе проверены на фразах из живого звонка:
+     * <ul>
+     *   <li>токены нарезались регуляркой «не буква и не пробел», а цифры — это
+     *       тоже «не буква». Год, названный цифрами («12 марта 1978»), выпадал из
+     *       фразы целиком, и дата не находилась вообще;</li>
+     *   <li>день и месяц искались строго в порядке «сначала день, потом месяц».
+     *       Фраза «марта двенадцатое» уходила в другую ветку разбора и давала
+     *       12 СЕНТЯБРЯ — молчаливо неверную дату рождения. Для идентификации
+     *       это хуже, чем «не понял»: пациента можно опознать как другого человека.</li>
+     * </ul>
+     * Теперь цифры в токенах сохраняются, а день и месяц ищутся в любом порядке.
+     */
     static LocalDate birthDate(String text) {
-        // 1) цифрами: 05.05.1962, 12.03.78, 5 мая 1962 не разбираем — словами ниже
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        // 1) цифрами с разделителями: 05.05.1962, 12.03.78
         Matcher m = Pattern.compile("(\\d{1,2})[.\\-/](\\d{1,2})(?:[.\\-/](\\d{2,4}))?").matcher(text);
         while (m.find()) {
             int day = Integer.parseInt(m.group(1));
@@ -230,69 +247,150 @@ public final class PatientNameParser {
                 return d;
             }
         }
-        // 2) словами с названием месяца: «двенадцатое марта семьдесят восьмого»
-        String[] tokens = text.replaceAll("[^\\p{L}\\s]", " ").split("\\s+");
-        for (int i = 0; i < tokens.length; i++) {
-            int day = RussianTime.parseOrdinal(tokens[i]);
-            if (day < 1 || day > 31) {
+        // 2) словами: «двенадцатое марта тысяча девятьсот семьдесят восьмого»,
+        //    «двенадцатое три семьдесят восемь», «12 марта 1978».
+        String[] tokens = text.replaceAll("[^\\p{L}\\d]+", " ").trim().split("\\s+");
+        for (int mAt = 0; mAt < tokens.length; mAt++) {
+            int month = monthOrNumber(tokens[mAt]);
+            if (month < 1 || month > 12) {
                 continue;
             }
-            for (int j = i + 1; j < Math.min(tokens.length, i + 4); j++) {
-                LocalDate d = withMonth(day, tokens[j]);
-                if (d == null) {
+            // день ищем рядом в обе стороны: «марта двенадцатое» пациент
+            // произносит так же легко, как «двенадцатое марта»
+            for (int dAt = mAt - 2; dAt <= mAt + 2; dAt++) {
+                if (dAt < 0 || dAt >= tokens.length || dAt == mAt) {
                     continue;
                 }
-                return build(day, d.getMonthValue(), yearAfter(tokens, j));
-            }
-        }
-        // 3) словами с номером месяца: «двенадцатое три семьдесят восьмого».
-        // Так пациент на диктофоне произносит «12.03.78», и месяц числом —
-        // самый частый вариант после «двенадцатого марта».
-        for (int i = 0; i < tokens.length; i++) {
-            int day = RussianTime.parseOrdinal(tokens[i]);
-            if (day < 1 || day > 31) {
-                continue;
-            }
-            // месяц идёт следующим словом, но с возможным «ноль» перед ним:
-            // «двенадцатое ноль три семьдесят восемь»
-            int month = -1;
-            int monthAt = -1;
-            for (int k = i + 1; k < Math.min(tokens.length, i + 4); k++) {
-                int v = RussianTime.parseNumber(tokens[k]);
-                if (v >= 1 && v <= 12) {
-                    month = v;
-                    monthAt = k;
-                    break;
+                int day = dayAt(tokens, dAt);
+                if (day < 1 || day > 31) {
+                    continue;
                 }
-            }
-            if (month < 0) {
-                continue;
-            }
-            LocalDate d = build(day, month, yearAfter(tokens, monthAt));
-            if (d != null) {
-                return d;
+                // год ищем после последнего из «день/месяц»
+                LocalDate d = build(day, month, yearAfter(tokens, Math.max(dAt, mAt)));
+                if (d != null) {
+                    return d;
+                }
             }
         }
         return null;
     }
 
     /**
+     * Месяц как название («марта», «марте») или как число — цифрами («03»)
+     * либо прописью («три»).
+     *
+     * <p>Прописью месяц принимается только в форме именительного падежа:
+     * «двенадцатое три» — это 12 марта, где «двенадцатое» день, а «три» месяц.
+     * Порядковые формы («двенадцатое», «третий») отбрасываются, иначе день
+     * принимался бы за месяц и дата собиралась бы неправильная.
+     */
+    private static int monthOrNumber(String token) {
+        int byName = monthOf(token);
+        if (byName > 0) {
+            return byName;
+        }
+        String digits = token.replaceAll("\\D", "");
+        if (!digits.isEmpty()) {
+            try {
+                int v = Integer.parseInt(digits);
+                return v >= 1 && v <= 12 ? v : -1;
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        String w = token.toLowerCase(Locale.ROOT).replace('ё', 'е');
+        for (String ending : ORDINAL_ENDINGS) {
+            if (w.endsWith(ending)) {
+                return -1;
+            }
+        }
+        int spoken = RussianTime.parseNumber(w);
+        return spoken >= 1 && spoken <= 12 ? spoken : -1;
+    }
+
+    /** Окончания порядковых числительных — по ним отсекаем день от месяца. */
+    private static final List<String> ORDINAL_ENDINGS =
+            List.of("ое", "ой", "ый", "ий", "ого", "его", "ому", "ему", "ых", "их");
+
+    /**
+     * День в позиции, с учётом составного числительного.
+     *
+     * <p>«Тридцать первое» — один день, а не «тридцать» и «первое» рядом.
+     * Без склейки бралось первое слово, и тридцать первое декабря превращалось
+     * в тридцатое: дата вроде бы распознана, но на месяц раньше.
+     */
+    private static int dayAt(String[] tokens, int at) {
+        int v = dayOrNumber(tokens[at]);
+        if (v < 20 || v % 10 != 0 || at + 1 >= tokens.length) {
+            return v;
+        }
+        String word = tokens[at].toLowerCase(Locale.ROOT).replace('ё', 'е');
+        // ровно два десятка: «двадцать первое» = 21, «тридцать первое» = 31.
+        // «тридцатого» — уже порядковое, его склеивать не с чем
+        if (!word.equals("двадцать") && !word.equals("тридцать")) {
+            return v;
+        }
+        int add = RussianTime.parseOrdinal(tokens[at + 1]);
+        return add >= 1 && add <= 9 ? v + add : v;
+    }
+
+    /** День как порядковое числительное («двенадцатое») или как число («12»). */
+    private static int dayOrNumber(String token) {
+        int ordinal = RussianTime.parseOrdinal(token);
+        if (ordinal > 0) {
+            return ordinal;
+        }
+        String digits = token.replaceAll("\\D", "");
+        if (!digits.isEmpty()) {
+            try {
+                return Integer.parseInt(digits);
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Год после названия месяца. Часто он назван ДВУМЯ словами: «семьдесят восьмого».
      * Раньше бралось только первое слово, и «78» превращалось в 1970.
      */
+    /**
+     * Год после названного дня/месяца.
+     *
+     * <p>Окно — до четырёх слов, а не до двух: год, названный словами,
+     * состоит из четырёх частей («тысяча девятьсот семьдесят восьмого»), и
+     * раньше окно обрывалось на третьем слове. Слово «тысяча» при этом
+     * читалось как 1000, цикл видел «число >= 100» и возвращал 1000 —
+     * год не получался, и сценарий просил дату рождения заново, сколько бы
+     * раз её ни называли.
+     */
     private static int yearAfter(String[] tokens, int monthIndex) {
         int collected = -1;
-        for (int k = monthIndex + 1; k < Math.min(tokens.length, monthIndex + 3); k++) {
+        // «тысяча девятьсот семьдесят восьмого» и «две тысячи пятого»:
+        // тысячи не складываются с остатком, а умножаются — «две тысячи» это 2000,
+        // а 2 + 1000 = 1002, откуда рождался несуществующий год.
+        int thousands = 0;
+        for (int k = monthIndex + 1; k < Math.min(tokens.length, monthIndex + 5); k++) {
             int v = RussianTime.parseNumber(tokens[k]);
             if (v < 0) {
                 break;              // год закончился: дальше не про год
             }
-            if (v >= 100 && collected < 0) {
-                return v;           // «тысяча девятьсот...» — год назван целиком
+            if (v == 1000) {
+                thousands = collected < 0 ? 1 : collected;
+                collected = 0;
+                continue;
             }
             // «семьдесят» + «восьмого» = 78. Брать только первое слово нельзя:
             // из «семьдесят» получался 1970 год вместо 1978.
             collected = collected < 0 ? v : collected + v;
+            if (thousands == 0 && collected > 2100) {
+                return -1;         // такого года не бывает — дальше не гадаем
+            }
+        }
+        if (thousands > 0) {
+            int year = thousands * 1000 + Math.max(collected, 0);
+            return year > 1900 && year <= 2100 ? year : -1;
         }
         // Двузначный год начинается с 10. Порог 31 здесь был ошибкой:
         // «двадцать шестого» давало 26 и год терялся.

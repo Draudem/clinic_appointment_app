@@ -206,7 +206,20 @@ public final class PolicyRules {
             "нет", "неверно", "не надо", "не нужно", "не хочу", "отмена", "отменить",
             "отказ", "стоп", "не то", "другое", "неа");
 
-    /** Короткое слово сравниваем целиком, длинное ищем как вхождение. */
+    /**
+     * Ответ на «да/нет»: решает ПОСЛЕДНЕЕ сказанное слово.
+     *
+     * <p>Раньше сначала искалось любое слово из NO, затем любое из YES, а
+     * короткое слово требовало, чтобы вся реплика была ровно этим словом.
+     * Из-за этого «…восемь тридцать верно нет» считалось согласием: «верно»
+     * длинное и искалось подстрокой, а «нет» короткое и не совпадало.
+     * Пациент отказывался — а его записывали. Теперь отказ, сказанный после
+     * согласия, отменяет согласие, и наоборот.
+     *
+     * <p>Применяется только там, где сценарий ждёт ответа: см.
+     * {@link #expectsYesNo(String)}. На этапе выбора слота реплика «да»
+     * ничего не значит, там нужен конкретный день и время.
+     */
     public static Answer answer(String text) {
         String q = ClinicalKnowledgeBase.normalize(text)
                 .replaceAll("[^\\p{L}\\p{N}+\\- ]", " ")
@@ -215,24 +228,57 @@ public final class PolicyRules {
         if (q.isEmpty()) {
             return Answer.UNKNOWN;
         }
+        Answer last = Answer.UNKNOWN;
+        int lastAt = -1;
+        // Оба списка обходятся вместе: важен не порядок проверки, а позиция.
+        // Отдельно NO и YES проверять нельзя — тогда первое найденное и снова
+        // выигрывает не то, что сказал пациент последним.
         for (String w : NO) {
-            if (hit(q, w)) {
-                return Answer.NO;
+            int at = position(q, w);
+            if (at > lastAt) {
+                lastAt = at;
+                last = Answer.NO;
             }
         }
         for (String w : YES) {
-            if (hit(q, w)) {
-                return Answer.YES;
+            int at = position(q, w);
+            if (at > lastAt) {
+                lastAt = at;
+                last = Answer.YES;
             }
         }
-        return Answer.UNKNOWN;
+        return last;
     }
 
-    private static boolean hit(String q, String word) {
+    /**
+     * Позиция ПОСЛЕДНЕГО вхождения слова в фразу, либо -1 если его нет.
+     *
+     * <p>Именно последнего: правило «решает последнее сказанное» иначе
+     * нарушилось бы на слове, которое пациент произнёс дважды.
+     *
+     * <p>Короткие слова ищем ТОЛЬКО как целые. Подстрочный поиск здесь дал бы
+     * катастрофу: «не» нашлось бы внутри «поНЕдельник», и любая фраза с днём
+     * недели превратилась бы в отказ от записи.
+     */
+    private static int position(String q, String word) {
         if (word.length() <= 3) {
-            return q.equals(word);
+            int found = -1;
+            int from = 0;
+            while (true) {
+                int at = q.indexOf(word, from);
+                if (at < 0) {
+                    return found;
+                }
+                boolean leftOk = at == 0 || q.charAt(at - 1) == ' ';
+                int end = at + word.length();
+                boolean rightOk = end >= q.length() || q.charAt(end) == ' ';
+                if (leftOk && rightOk) {
+                    found = at;          // запоминаем ПОСЛЕДНЕЕ целое вхождение
+                }
+                from = at + 1;
+            }
         }
-        return q.equals(word) || q.contains(word);
+        return q.lastIndexOf(word);
     }
 
     /** Порядковый номер варианта: «второй», «2», «второй вариант». */

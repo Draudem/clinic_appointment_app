@@ -3,6 +3,7 @@ package com.clinic.backend.voice;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -247,13 +248,18 @@ public final class RussianTime {
         if (w.isEmpty()) {
             return -1;
         }
-        for (Map.Entry<String, Integer> e : ORDINAL_WORDS.entrySet()) {
-            if (w.startsWith(e.getKey())) {
-                return e.getValue();
+        // Ключи проверяются ОТ САМОГО ДЛИННОГО. Порядок обхода Map.ofEntries не
+        // определён, и раньше «девят» успевало раньше «девятнадцат»:
+        // «девятнадцатого» читалось как девять, а не девятнадцать.
+        for (String key : ORDINAL_BY_LENGTH_DESC) {
+            if (w.startsWith(key)) {
+                return ORDINAL_WORDS.get(key);
             }
         }
         return -1;
     }
+
+
 
     private static final Map<String, Integer> ORDINAL_WORDS = Map.ofEntries(
             Map.entry("перв", 1), Map.entry("втор", 2), Map.entry("трет", 3),
@@ -264,6 +270,11 @@ public final class RussianTime {
             Map.entry("пятнадцат", 15), Map.entry("шестнадцат", 16), Map.entry("семнадцат", 17),
             Map.entry("восемнадцат", 18), Map.entry("девятнадцат", 19), Map.entry("двадцат", 20),
             Map.entry("тридцат", 30));
+
+    /** Ключи ORDINAL_WORDS, отсортированные по убыванию длины. */
+    private static final List<String> ORDINAL_BY_LENGTH_DESC = ORDINAL_WORDS.keySet().stream()
+            .sorted(Comparator.comparingInt(String::length).reversed())
+            .toList();
 
     /** Дата и время одной фразой: «в четверг, первого октября, в девять тридцать». */
     public static String sayDateTime(LocalDate date, String hhmm) {
@@ -360,6 +371,15 @@ public final class RussianTime {
                 return t * 10;
             }
         }
+        // Десятки в родительном: «девяностого», «восемьдесятого». Пациент произносит
+        // год как «тысяча девятьсот ДЕВЯНОСТОГО», и без этого хвоста год не собирался:
+        // разбор обрывался, и дата рождения не находилась.
+        for (int t = 9; t >= 2; t--) {
+            int tail = w.length() - TENS[t].length();
+            if (tail > 0 && tail <= 3 && w.startsWith(TENS[t])) {
+                return t * 10;
+            }
+        }
         for (int i = 0; i < TEENS.length; i++) {
             if (w.equals(TEENS[i])) {
                 return 10 + i;
@@ -370,8 +390,30 @@ public final class RussianTime {
                 return i;
             }
         }
+        // Сотни и «тысяча». Без них год, названный словами, не читался вовсе:
+        // «тысяча девятьсот семьдесят восьмого» — первый и самый естественный
+        // способ произнести дату рождения вслух — не разбирался, и сценарий
+        //identification зацикливался, прося дату рождения снова и снова.
+        for (Map.Entry<String, Integer> e : HUNDREDS.entrySet()) {
+            if (w.equals(e.getKey())) {
+                return e.getValue();
+            }
+        }
+        if (THOUSAND.contains(w)) {
+            return 1000;
+        }
         return -1;
     }
+
+    /** Сотни прописью — те же слова, что строит {@link #hundreds(int)}. */
+    private static final Map<String, Integer> HUNDREDS = Map.ofEntries(
+            Map.entry("сто", 100), Map.entry("двести", 200), Map.entry("триста", 300),
+            Map.entry("четыреста", 400), Map.entry("пятьсот", 500), Map.entry("шестьсот", 600),
+            Map.entry("семьсот", 700), Map.entry("восемьсот", 800), Map.entry("девятьсот", 900));
+
+    /** Падежные формы «тысяча»: «две тысячи пятого», «тысячу девятьсот». */
+    private static final java.util.Set<String> THOUSAND =
+            java.util.Set.of("тысяча", "тысячи", "тысячу", "тысяч", "тысячей");
 
     /**
      * «в четыре часа дня» -> 16:00, «в девять тридцать» -> 09:30,

@@ -38,8 +38,20 @@ public class BookingFlow {
 
     private static final Logger log = LoggerFactory.getLogger(BookingFlow.class);
 
-    /** Регламент 3.2: не более трёх вариантов за раз. */
-    private static final int MAX_OPTIONS = 3;
+    /**
+     * Сколько вариантов называть за раз.
+     *
+     * <p>С-03 (перенос) — три: регламент прямо велит «Перечислить не более трёх
+     * (специальность, дата), спросить, какую переносить».
+     *
+     * <p>С-01 (запись) — один. Регламент 3.2 разрешает «не более трёх», то есть
+     * один не противоречит. А перечисление вредило: эхо отозванного списка
+     * возвращалось в микрофон, и в распознанной фразе «в пятницу… В ПОНЕДЕЛЬНИК…
+     * вторник» день выбирался первым найденным — то есть чужим. В звонке #25
+     * пациент просил вторник, а его записали на понедельник.
+     */
+    private static final int RESCHEDULE_OPTIONS = 3;
+    private static final int BOOKING_OPTIONS = 1;
 
     private final CommandParser parser;
     private final SlotResolver slots;
@@ -274,7 +286,8 @@ public class BookingFlow {
     private Turn offerSlots(DialogueSession session, String greeting) {
         LocalDate today = LocalDate.now();
         TimeResolver.TimePreference pref = from(session);
-        List<SlotResolver.Slot> found = slots.offerSlots(session.getSpecialty(), pref, today, MAX_OPTIONS);
+        List<SlotResolver.Slot> found = slots.offerSlots(
+                session.getSpecialty(), pref, today, BOOKING_OPTIONS);
         if (found.isEmpty()) {
             // С-11: нет слотов в горизонте — лист ожидания, а не выдуманная запись
             String reply = greeting + "Свободного времени в ближайшие две недели нет. "
@@ -284,20 +297,10 @@ public class BookingFlow {
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
         }
-        List<Turn.Slot> options = found.stream().map(this::toSlot).toList();
-        StringBuilder sb = new StringBuilder(greeting).append("Ближайшее время: ");
-        for (int i = 0; i < options.size(); i++) {
-            if (i > 0) {
-                sb.append("; ");
-            }
-            sb.append(options.get(i).spokenCompact(today));
-        }
-        sb.append(". Что вам подходит?");
-        String reply = sb.toString();
-        session.setOfferedSlots(encode(options));
-        session.setStage("OFFER");
-        session.append("ассистент", reply);
-        return Turn.continueWith(reply, "OFFER", options, 0);
+        // Один вариант: называем дату и спрашиваем, как требует регламент
+        // в формулировке «Записать вас?». Этап сразу подтверждения — там
+        // сценарий ждёт ответа и правило «последнее слово решает» работает.
+        return offerBooking(session, greeting, toSlot(found.get(0)));
     }
 
     // ------------------------------------------------------------------
@@ -431,16 +434,40 @@ public class BookingFlow {
         session.setPendingAction("BOOK");
         session.setPendingDoctorId(picked.doctorId());
         session.setPendingDate(picked.date().toString());
+        preparePending(session, picked);
+        // «Записать вас?» — формулировка регламента (раздел 4, встречается
+        // десять раз). Раньше здесь было «Записываю? Ответьте «да» или «нет»»
+        String reply = prefix.isEmpty()
+                ? picked.spoken() + ". Записать вас?"
+                : prefix + picked.spoken() + ". Верно?";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
+    }
+
+    /**
+     * Предложение записи на один слот: «Спасибо, Игорь Николаевич.
+     * В пятницу, в девять. Записать вас?»
+     *
+     * <p>Этап сразу подтверждения, а не перечисления: ждём «да» или «нет»,
+     * и правило «последнее сказанное слово решает» применяется как задумано.
+     */
+    private Turn offerBooking(DialogueSession session, String greeting, Turn.Slot picked) {
+        preparePending(session, picked);
+        String reply = greeting + picked.spoken() + ". Записать вас?";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
+    }
+
+    /** Готовит слот к подтверждению: что именно мы собираемся записать. */
+    private void preparePending(DialogueSession session, Turn.Slot picked) {
+        session.setPendingAction("BOOK");
+        session.setPendingDoctorId(picked.doctorId());
+        session.setPendingDate(picked.date().toString());
         session.setPendingTime(picked.time());
         session.setPendingCabinet(picked.cabinet());
         session.setPendingSummary(picked.spoken());
         session.setOfferedSlots(encode(List.of(picked)));
         session.setStage("PENDING_CONFIRMATION");
-        String reply = prefix.isEmpty()
-                ? picked.spoken() + ". Записываю? Ответьте «да» или «нет»."
-                : prefix + picked.spoken() + ". Верно?";
-        session.append("ассистент", reply);
-        return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
     }
 
     private Turn onConfirm(DialogueSession session, String text) {
@@ -589,7 +616,7 @@ public class BookingFlow {
             }
         }
 
-        List<SlotResolver.Slot> found = slots.offerSlots(specialty, pref, today, MAX_OPTIONS);
+        List<SlotResolver.Slot> found = slots.offerSlots(specialty, pref, today, RESCHEDULE_OPTIONS);
         if (found.isEmpty()) {
             String reply = "Свободного времени для переноса сейчас нет. "
                     + "Могу оставить запись как есть.";
@@ -701,38 +728,81 @@ public class BookingFlow {
             return continueScenario(session, found);
         }
 
-        if (!data.hasFio() && !data.hasBirthDate()) {
-            String reply = "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.";
-            session.append("ассистент", reply);
-            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+        // Что названо, складываем из нескольких ходов. Раньше разбиралась только
+        // текущая реплика, и пациент ходил по кругу: назвал ФИО, назвал дату
+        // рождения — и его снова просили назвать ФИО.
+        String fio = data.hasFio() ? data.fio() : session.getSaidFio();
+        LocalDate birth = data.hasBirthDate() ? data.birthDate() : rememberedBirth(session);
+        if (fio != null) {
+            session.setSaidFio(fio);
         }
-        if (!data.hasSurname()) {
-            String reply = "Назовите, пожалуйста, фамилию.";
-            session.append("ассистент", reply);
-            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
-        }
-        if (!data.hasBirthDate()) {
-            String reply = "Назовите, пожалуйста, дату рождения.";
-            session.append("ассистент", reply);
-            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+        if (birth != null) {
+            session.setSaidBirthDate(birth.toString());
         }
 
-        // Названо только одно слово — ищем по фамилии, но лишь если такая
-        // фамилия в базе единственная. Иначе перевод: определить, КТО это,
-        // по одной фамилии нельзя (регламент 3.5).
-        Optional<PatientIdentity> found = data.hasFio()
-                ? identity.findByFioAndBirthDate(data.fio(), data.birthDate())
-                : identity.findByLastName(data.surname());
-        if (found.isEmpty()) {
-            // Р-07: не нашли. Повторно просим только недостающее, ничего не подсказывая.
-            String reply = "Не получается найти вас в базе. Проверьте, пожалуйста, "
-                    + "фамилию и дату рождения.";
-            session.append("ассистент", reply);
-            return Turn.continueWith(reply, "IDENTITY", List.of(), 1);
+        if (fio == null && birth == null) {
+            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество "
+                    + "и дату рождения.");
         }
-        PatientIdentity p = found.get();
-        session.setPatientLogin(p.login());
-        return continueScenario(session, p);
+        if (fio == null) {
+            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя и отчество.");
+        }
+        if (birth == null) {
+            return askIdentity(session, "Назовите, пожалуйста, дату рождения.");
+        }
+
+        Optional<PatientIdentity> found = identity.findByFioAndBirthDate(fio, birth);
+        if (found.isEmpty()) {
+            return onIdentityNotFound(session);
+        }
+        session.setPatientLogin(found.get().login());
+        return continueScenario(session, found.get());
+    }
+
+    /** Дата рождения из предыдущих ходов этого же звонка. */
+    private static LocalDate rememberedBirth(DialogueSession session) {
+        String v = session.getSaidBirthDate();
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(v);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Простое уточнение недостающего — попыткой идентификации не считается. */
+    private Turn askIdentity(DialogueSession session, String reply) {
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+    }
+
+    /**
+     * Р-07: пациента нет в базе.
+     *
+     * <p>Фамилия и дата рождения переспрашиваются РОВНО ОДИН РАЗ, на второй
+     * неудаче — перевод оператору. Раньше повтор был бесконечным: счётчик
+     * неудач обнулялся на каждом ходу, поэтому лестница Р-05 не срабатывала
+     * и ассистент мог до конца звонка повторять «Не получается найти вас в базе».
+     *
+     * <p>Шаг «попросить номер полиса ОМС» из регламента 3.5 здесь пропущен
+     * сознательно: для стенда перевод оператору понятнее. Разбор номера
+     * полиса в коде уже есть ({@code PatientNameParser.policy()}), подключить
+     * его — одна правка.
+     */
+    private Turn onIdentityNotFound(DialogueSession session) {
+        int misses = session.getIdentityMisses() + 1;
+        session.setIdentityMisses(misses);
+        if (misses >= 2) {
+            String reply = "Проверьте, пожалуйста, данные в регистратуре. "
+                    + "Соединяю с сотрудником.";
+            return transfer(session, reply, "Р-07");
+        }
+        String reply = "Не получается найти вас в базе. Проверьте, пожалуйста, "
+                + "фамилию и дату рождения.";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "IDENTITY", List.of(), misses);
     }
 
     /** Идентификация прошла — продолжаем сценарий с того места, где остановились. */

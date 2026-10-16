@@ -57,6 +57,13 @@ public class SttController {
         info.put("synthesizer", synthesizer.name());
         info.put("speakReplies", props.isSpeakReplies());
         info.put("silenceSeconds", props.getSilenceSeconds());
+
+        // Озвучка. Пока эти счётчики не было, поломка была невидима: сокет
+        // слушал, модель была загружена, /status отвечал «всё хорошо» — а голоса
+        // не было, потому что поток call-voice умер на первой же фразе.
+        info.put("spokenOk", CallVoice.spokenOk());
+        info.put("spokenFailed", CallVoice.spokenFailed());
+        info.put("voiceHealthy", CallVoice.spokenFailed() == 0);
         return info;
     }
 

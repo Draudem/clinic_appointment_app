@@ -161,6 +161,7 @@ public class AsteriskAudioSocketServer implements Runnable {
         int maxSamples = (int) (16000 * props.getMaxUtteranceSeconds());
         String callUuid = "call-" + callId;
         CallVoice voice = null;
+        int turns = 0;
         // Ответили ли уже: первая распознанная фраза завершает сценарий звонка.
         boolean answered = false;
 
@@ -224,6 +225,7 @@ public class AsteriskAudioSocketServer implements Runnable {
                                 // Фраза клиента. Распознаём и пишем текст ВСЕГДА,
                                 // в том числе пока ассистент ещё договаривает.
                                 String said = flushUtterance(callId, callUuid, segmenter, minSamples);
+                                long recognizedAt = System.currentTimeMillis();
                                 if (said != null && !said.isBlank()) {
                                     // Реплика пациента уходит в сценарий С-01, тот решает,
                                     // что сказать и когда закончить. Здесь НЕТ логики записи:
@@ -234,8 +236,17 @@ public class AsteriskAudioSocketServer implements Runnable {
                                     if (turn != null && turn.reply() != null
                                             && !turn.reply().isBlank()) {
                                         voice.enqueue(turn.reply());
-                                        log.info("Звонок #{}: этап={} действие={} — озвучиваем ответ",
-                                                callId, turn.stage(), turn.action());
+                                        // Одна строка на весь ход: распознано ->
+                                        // этап -> ответ -> сколько ждать до звука.
+                                        // Раньше эти сведения были разнесены по трём
+                                        // разным строкам логов разных классов, и
+                                        // «ассистент не ответил» невозможно было
+                                        // подтвердить, не читая их подряд.
+                                        log.info("Звонок #{} ход {}: этап={} действие={} "
+                                                        + "ответ=«{}» озвучка поставлена, до звука {}",
+                                                callId, ++turns, turn.stage(), turn.action(),
+                                                brief(turn.reply()),
+                                                turnLatencyMillis(recognizedAt, turn.reply()));
                                     }
                                     if (turn != null && turn.action() != Turn.Action.CONTINUE) {
                                         // Даём фразе дозвучать и только потом закрываем сокет.
@@ -295,6 +306,24 @@ public class AsteriskAudioSocketServer implements Runnable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /** Короткий вид фразы: логи не должны распухать на длинных текстах. */
+    private static String brief(String text) {
+        if (text == null) {
+            return "";
+        }
+        String one = text.replace('\n', ' ').trim();
+        return one.length() > 80 ? one.substring(0, 80) + "…" : one;
+    }
+
+    /**
+     * Сколько ждать первого звука ответа: доля пути, которую пациент ощущает
+     * как молчание. В логе видно без замеров по таблицам.
+     */
+    private static String turnLatencyMillis(long recognizedAt, String reply) {
+        return "~" + (System.currentTimeMillis() - recognizedAt) + " мс, ответ из "
+                + CallVoice.splitSentences(reply).size() + " фр.";
     }
 
     /**

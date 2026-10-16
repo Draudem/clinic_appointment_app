@@ -122,19 +122,22 @@ class BookingFlowTest {
             assertEquals("IDENTITY", t1.stage(), "без идентификации запись не начинаем");
             assertTrue(t1.reply().contains("фамилию"));
 
+            // Предлагается ОДИН ближайший слот вопросом «Записать вас?».
+            // Перечисление вариантов убрано: эхо возвращало список в микрофон,
+            // и день недели из эхо выбирался раньше названного пациентом —
+            // в звонке #25 просили вторник, а записали на понедельник.
             Turn t2 = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertEquals("OFFER", t2.stage(), "после идентификации предлагаем слоты");
-            assertFalse(t2.options().isEmpty());
-            assertTrue(t2.options().size() <= 3, "регламент 3.2: не более трёх вариантов");
+            assertEquals("PENDING_CONFIRMATION", t2.stage(), "после идентификации — предложение");
+            assertEquals(1, t2.options().size(), "предлагаем один вариант");
+            assertTrue(t2.reply().contains("Записать вас?"), t2.reply());
 
-            Turn t3 = say("второй");
-            assertEquals("PENDING_CONFIRMATION", t3.stage());
-            assertTrue(t3.reply().contains("Записываю"), "подтверждаем вслух: " + t3.reply());
-
-            Turn t4 = say("да");
-            assertEquals(Turn.Action.HANGUP, t4.action());
-            assertEquals("BOOKED", t4.resultCode());
-            assertTrue(t4.reply().contains("вы записаны"));
+            // «да» на предложение — сразу запись, второго подтверждения не нужно:
+            // вопрос «Записать вас?» уже был согласием, спрашивать ещё раз
+            // значило бы заставлять пациента повторять одно и то же
+            Turn t3 = say("да");
+            assertEquals(Turn.Action.HANGUP, t3.action());
+            assertEquals("BOOKED", t3.resultCode());
+            assertTrue(t3.reply().contains("вы записаны"));
             assertEquals("CONFIRMED", session.getStage());
         }
 
@@ -143,11 +146,9 @@ class BookingFlowTest {
         void refusalDoesNotBook() {
             say("хочу записаться к стоматологу");
             say("Смирнова Ольга Викторовна, 12.03.1978");
-            Turn t = say("второй");
             Turn after = say("нет");
             assertEquals(Turn.Action.CONTINUE, after.action());
             assertEquals("OFFER", after.stage());
-            assertEquals(Turn.Action.CONTINUE, t.action());
         }
     }
 
@@ -348,9 +349,10 @@ class BookingFlowTest {
         @Test
         @DisplayName("выбор варианта номером и по смыслу")
         void pickByNumberAndByMeaning() {
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            List<Turn.Slot> offered = t.options();
+            // сам сценарий предлагает один вариант (проверяется в bookEndToEnd),
+            // а pickSlot продолжает работать на любом списке: он нужен, когда
+            // пациент на этапе подтверждения называет другое время
+            List<Turn.Slot> offered = testSlots().stream().map(flow::toSlot).toList();
             assertEquals(3, offered.size());
 
             // «второй» -> второй вариант

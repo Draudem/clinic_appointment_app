@@ -50,3 +50,9 @@ data/
 # NLU-модель и токенизатор (~24 МБ) — в репозиторий не кладутся.
 # Собираются из исходников коллеги: deploy/export-nlu-model.sh
 models/nlu/
+
+logs
+
+# Дампы базы: содержат пароли (users.password) и транскрипты разговоров.
+# Готовятся вручную: pg_dump -h 127.0.0.1 -U clinic -d clinic --schema=public
+# backups/

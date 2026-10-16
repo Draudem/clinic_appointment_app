@@ -114,6 +114,31 @@ public class DialogueSession {
     @Column(nullable = false, columnDefinition = "integer default 0")
     private int missCount;
 
+    /**
+     * ФИО, которое пациент уже назвал в этом звонке.
+     *
+     * <p>Раньше {@code onIdentity} разбирала только текущую реплику, поэтому
+     * названное терялось между ходами: пациент давал ФИО, потом дату рождения,
+     * и на дату ассистент отвечал «Назовите фамилию» — её он только что назвал.
+     * Теперь недостающее складывается из того, что уже сказано.
+     */
+    @Column(length = 255)
+    private String saidFio;
+
+    /** Дата рождения, названная пациентом, в формате ISO. */
+    @Column(length = 10)
+    private String saidBirthDate;
+
+    /**
+     * Сколько раз пациента не нашли. На второй попытке — перевод оператору.
+     *
+     * <p>Раньше счётчик неудач обнулялся на каждом ходу, и регламентная
+     * лестница Р-05 не срабатывала никогда: ассистент мог бесконечно
+     * повторять «Не получается найти вас в базе».
+     */
+    @Column(nullable = false, columnDefinition = "integer default 0")
+    private int identityMisses;
+
     /** Пациент отказался от записи разговора (3.4). */
     @Column(nullable = false, columnDefinition = "boolean default false")
     private boolean recordingOptOut;
@@ -375,6 +400,37 @@ public class DialogueSession {
         this.missCount++;
     }
 
+    public String getSaidFio() {
+        return saidFio;
+    }
+
+    public void setSaidFio(String saidFio) {
+        this.saidFio = saidFio;
+    }
+
+    public String getSaidBirthDate() {
+        return saidBirthDate;
+    }
+
+    public void setSaidBirthDate(String saidBirthDate) {
+        this.saidBirthDate = saidBirthDate;
+    }
+
+    public int getIdentityMisses() {
+        return identityMisses;
+    }
+
+    public void setIdentityMisses(int identityMisses) {
+        this.identityMisses = identityMisses;
+    }
+
+    /** Новый звонок — всё, что было названо, забываем. */
+    public void resetIdentity() {
+        this.saidFio = null;
+        this.saidBirthDate = null;
+        this.identityMisses = 0;
+    }
+
     public boolean isRecordingOptOut() {
         return recordingOptOut;
     }
@@ -401,6 +457,11 @@ public class DialogueSession {
         this.patientLogin = "";
         this.patientFio = null;
         this.patientBirthDate = null;
+        // то, что пациент успел назвать в ПРОШЛОМ звонке, к новому отношения
+        // не имеет: иначе «Петров» из вчерашнего разговора опознался бы сегодня
+        this.saidFio = null;
+        this.saidBirthDate = null;
+        this.identityMisses = 0;
         this.pendingAction = null;
         this.pendingDoctorId = null;
         this.pendingDate = null;
