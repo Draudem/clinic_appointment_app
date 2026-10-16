@@ -13,7 +13,7 @@ spring:
 
   datasource:
     # Локально: localhost; в Docker — переопределяется env DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:clinic}
+    url: jdbc:postgresql://${DB_HOST:10.2.173.150}:${DB_PORT:5432}/${DB_NAME:clinic}
     username: ${DB_USER:clinic}
     password: ${DB_PASSWORD:clinic}
 
@@ -96,9 +96,10 @@ app:
     # что весь этот запас уходит в тишину: пациент замолчал — и мы молчим ещё
     # секунду с лишним, прежде чем распознать. 0,8 — минимум, при котором
     # пауза внутри фразы («в пятницу… в девять») не разрезает её на части.
-    silence-seconds: ${STT_SILENCE_SECONDS:0.8}
+    silence-seconds: ${STT_SILENCE_SECONDS:0.6}
     # Максимальная длина одной фразы, после неё форсируем распознавание (секунды)
-    max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:20}
+    max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:6}
+    silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.03}
     # Отдавать ли распознанный текст обратно в сокет.
     # true  -> синтез речи TTS и отправка аудио (0x10) обратно в Asterisk;
     # false -> в сокет уходит только тишина, текст забирают по HTTP (режим заглушки).

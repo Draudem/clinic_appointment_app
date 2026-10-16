@@ -8,35 +8,22 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Голосовой поток одного звонка: синтез и отправка аудио в сокет.
  *
- * ЗАЧЕМ ОТДЕЛЬНЫЙ ПОТОК
- * ----------------------
- * Поток чтения в AsteriskAudioSocketServer непрерывен: он принимает кадры звонящего,
- * режет фразы по тишине и РАСПОЗНАЁТ их. Если синтез и отправка выполнялись бы там же,
- * чтение останавливалось бы на все 6.7 секунды приветствия — и то, что клиент сказал
- * поверх, пропало бы.
+ * <p>Флаг {@link #isSpeaking()} используется в {@link AsteriskAudioSocketServer}
+ * для VAD-гейтинга: пока ассистент говорит (и ещё {@link #ECHO_TAIL_MS} мс после),
+ * входящее аудио от клиента игнорируется. Это отсекает акустическое эхо —
+ * голос ассистента через динамик телефона попадает в микрофон и без гейтинга
+ * распознаётся как «речь клиента».
  *
- * ЗДЕСЬ ПОТОК НИКОГДА НЕ УМИРАЕТ
- * ------------------------------
- * Раньше цикл был {@code while ((text = queue.poll(200, MS)) != null)}: на пустой
- * очереди poll возвращал null, цикл выходил, поток умирал. Позже enqueue() клал
- * фразу в очередь, но читать её было уже некому, awaitFinished() возвращался
- * мгновенно, и сервер вешал трубку через TTS_CLOSE_DELAY_SECONDS. Звонящий слышал
- * только приветствие, а «Спасибо, записываю» пропадало — это и было причиной
- * жалоб напарника. Теперь поток живёт до close() и ждёт фразы бесконечно,
- * а «дозвучало» определяется счётчиком непрочитанных фраз, а не латчем.
- *
- * ОТПРАВКА В ТЕМПЕ РЕАЛЬНОГО ВРЕМЕНИ
- * ----------------------------------
- * Кадр 320 байт = 20 мс на 8 кГц, поэтому между кадрами спим 20 мс. Если вывалить
- * всю фразу одним куском, Asterisk возьмёт её в буфер и начнёт отдавать в канал
- * с задержкой, а закрытие сокета может оборвать конец фразы.
+ * <p>Счётчики {@link #spokenOk()} / {@link #spokenFailed()} — глобальная
+ * статистика по всем звонкам, нужна для /api/stt/status.
  */
 class CallVoice {
 
@@ -48,33 +35,29 @@ class CallVoice {
     private static final int FRAME_MS = 20;
     private static final int TYPE_AUDIO = 0x10;
 
+    /**
+     * «Хвост тишины» после окончания речи ассистента: столько миллисекунд
+     * входящее аудио ещё считается эхом и игнорируется.
+     */
+    private static final long ECHO_TAIL_MS = 250;
+
+    /** Глобальная статистика: сколько фраз реально прозвучало. */
+    private static final AtomicLong SPOKEN_OK = new AtomicLong();
+    /** Глобальная статистика: сколько фраз не удалось озвучить. */
+    private static final AtomicLong SPOKEN_FAILED = new AtomicLong();
+
     private final OutputStream out;
     private final ReplySynthesizer synth;
     private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
-
-    /** Сколько фраз поставлено в очередь, но ещё не дозвучало. */
-    private final AtomicInteger pending = new AtomicInteger();
+    private final CountDownLatch finished = new CountDownLatch(1);
 
     private volatile boolean closed;
     private volatile IOException failure;
 
-    /**
-     * Поток озвучки жив?
-     *
-     * <p>Нужен для диагностики. Поток может молча умереть — тогда сокет слушает,
-     * STT отвечает «загружена», а голоса не будет никогда. Именно так выглядел
-     * сбой с IllegalFormatConversionException: {@code /api/stt/status} отвечал
-     * «всё хорошо», а озвучки не было.
-     */
-    private volatile boolean alive;
-
-    /** Сколько фраз успешно ушло в сокет — с начала работы процесса. */
-    private static final java.util.concurrent.atomic.AtomicLong SPOKEN_OK =
-            new java.util.concurrent.atomic.AtomicLong();
-
-    /** Сколько фраз сорвалось и не ушло в сокет. Ненулевое значение — озвучка сломана. */
-    private static final java.util.concurrent.atomic.AtomicLong SPOKEN_FAILED =
-            new java.util.concurrent.atomic.AtomicLong();
+    /** Пока true — ассистент физически пишет кадры в сокет. */
+    private volatile boolean speaking = false;
+    /** Время последнего кадра речи ассистента (для «хвоста тишины»). */
+    private volatile long lastSpokeAt = 0L;
 
     CallVoice(OutputStream out, ReplySynthesizer synth) {
         this.out = out;
@@ -86,190 +69,131 @@ class CallVoice {
 
     /** Ставит фразу в очередь озвучивания. */
     void enqueue(String text) {
-        if (closed || text == null || text.isBlank()) {
-            return;
+        if (!closed && text != null && !text.isBlank()) {
+            queue.add(text);
         }
-        pending.incrementAndGet();
-        queue.add(text);
     }
 
-    /**
-     * Ждёт, пока все поставленные фразы дозвучат.
-     * Возвращает true, если очередь опустела за отведённое время.
-     */
+    /** Ждёт, пока очередь опустеет и последняя фраза дозвучит. */
     boolean awaitFinished(long seconds) {
-        long deadline = System.currentTimeMillis() + seconds * 1000L;
+        long deadline = System.currentTimeMillis() + seconds * 1000;
         while (System.currentTimeMillis() < deadline) {
-            // Порядок проверок важен: сбой записи должен побеждать «очередь пуста».
-            // Раньше пустая очередь проверялась первой, и при оборванном сокете
-            // метод возвращал true — то есть «фраза дозвучала», хотя в канал
-            // не ушло ни одного кадра. Звонящий слышал тишину, а сценарий
-            // считал, что можно спокойно вешать трубку.
-            if (failure != null || closed) {
-                return false;
-            }
-            if (pending.get() == 0 && queue.isEmpty()) {
-                return true;
+            if (queue.isEmpty() && !speaking) {
+                return true;   // очередь пуста и не говорим — всё, ответ дозвучал
             }
             try {
-                Thread.sleep(20);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return false;
             }
         }
-        return failure == null && pending.get() == 0;
+        return false;
     }
 
     /**
-     * Тело потока: ждёт фразы бесконечно и умирает только по close().
-     * Пустая очередь — это не причина завершаться.
+     * Говорит ли ассистент прямо сейчас (или говорил только что — в пределах
+     * {@link #ECHO_TAIL_MS}). Пока true, входящее аудио игнорируется.
      */
+    public boolean isSpeaking() {
+        if (speaking) {
+            return true;
+        }
+        return (System.currentTimeMillis() - lastSpokeAt) < ECHO_TAIL_MS;
+    }
+
+    /** Успешно озвученных фраз (для /api/stt/status). */
+    static long spokenOk() {
+        return SPOKEN_OK.get();
+    }
+
+    /** Фраз, которые не удалось озвучить (для /api/stt/status). */
+    static long spokenFailed() {
+        return SPOKEN_FAILED.get();
+    }
+
+    /**
+     * Разбивает текст на предложения — используется для подсчёта «фраз»
+     * в логе хода диалога ({@code ответ из N фр.}).
+     */
+    static List<String> splitSentences(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String part : text.split("(?<=[.!?])\\s+")) {
+            String s = part.trim();
+            if (!s.isEmpty()) {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+
     private void run() {
-        alive = true;
         try {
             while (!closed) {
                 String text = queue.poll(200, TimeUnit.MILLISECONDS);
-                if (text == null) {
-                    continue;          // просто ждём следующую фразу
-                }
-                try {
+                if (text != null) {
                     speak(text);
-                } catch (RuntimeException e) {
-                    // Сбой одной фразы НЕ должен убивать поток.
-                    // Раньше любое непойманное исключение из speak() вылетало
-                    // из run() и обрывало озвучку навсегда: пациент слышал
-                    // приветствие, а на «запишите меня к терапевту» ответа
-                    // не было никогда — и это нигде не отмечалось.
-                    SPOKEN_FAILED.incrementAndGet();
-                    log.error("Сбой озвучки, фраза пропущена, поток продолжает: «{}»",
-                            brief(text), e);
                 }
+                // Если очередь пуста — просто продолжаем ждать.
+                // НЕ выходим из цикла: новые фразы могут появиться позже.
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            alive = false;
-            // Непрочитанные фразы не должны помешать проверке завершения.
-            queue.clear();
-            pending.set(0);
+            finished.countDown();
         }
     }
-
-    /** Короткий вид фразы для логов. */
-    private static String brief(String text) {
-        if (text == null) {
-            return "";
-        }
-        String one = text.replace('\n', ' ').trim();
-        return one.length() > 60 ? one.substring(0, 60) + "…" : one;
-    }
-
-    /**
-     * Отправляет готовый кусок в сокет кадрами по 20 мс.
-     * Возвращает false, если соединение закрылось — озвучку надо прекратить.
-     */
-    private boolean stream(byte[] pcm) throws IOException {
-        for (int offset = 0; offset < pcm.length && !closed; offset += FRAME_BYTES) {
-            int len = Math.min(FRAME_BYTES, pcm.length - offset);
-            out.write(TYPE_AUDIO);
-            out.write((len >> 8) & 0xFF);      // длина в заголовке — big endian
-            out.write(len & 0xFF);
-            out.write(pcm, offset, len);
-            out.flush();
-            sleepFrame();
-        }
-        return !closed;
-    }
-
-    /**
-     * Режет фразу по концам предложений, чтобы начать говорить раньше.
-     *
-     * <p>Граница — знак конца предложения с последующим пробелом. Точка внутри
-     * числа («в 9.30») границей не считается, потому что после неё пробела нет.
-     *
-     * <p>Кусок без знаков препинания длиннее 160 символов режется по словам:
-     * иначе фраза синтезировалась бы целиком и ожидание не уменьшилось бы.
-     */
-    static List<String> splitSentences(String text) {
-        List<String> out = new ArrayList<>();
-        if (text == null || text.isBlank()) {
-            return out;
-        }
-        List<String> parts = new ArrayList<>();
-        StringBuilder cur = new StringBuilder();
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            cur.append(c);
-            boolean end = (c == '.' || c == '!' || c == '?')
-                    && i + 1 < text.length() && Character.isWhitespace(text.charAt(i + 1));
-            if (end) {
-                parts.add(cur.toString().trim());
-                cur.setLength(0);
-            }
-        }
-        if (!cur.toString().isBlank()) {
-            parts.add(cur.toString().trim());
-        }
-        for (String part : parts) {
-            if (part.length() <= MAX_PART) {
-                out.add(part);
-                continue;
-            }
-            StringBuilder chunk = new StringBuilder();
-            for (String w : part.split("\\s+")) {
-                if (chunk.length() + w.length() > MAX_PART) {
-                    out.add(chunk.toString().trim());
-                    chunk.setLength(0);
-                }
-                chunk.append(w).append(' ');
-            }
-            if (!chunk.toString().isBlank()) {
-                out.add(chunk.toString().trim());
-            }
-        }
-        return out;
-    }
-
-    /** Длиннее этого кусок режем по словам. */
-    private static final int MAX_PART = 160;
 
     private void speak(String text) {
+        float[] raw;
         try {
-            long start = System.currentTimeMillis();
-            long spoken = 0;
-            // По одному предложению за раз: первое уходит в сокет, как только
-            // посчитано, остальные Piper считает, пока первое уже звучит.
-            for (String part : splitSentences(text)) {
-                float[] raw = synth.synthesize(part);
-                if (raw == null || raw.length == 0) {
-                    continue;
-                }
-                // Вниз до 8 кГц с фильтром: без него голос пищит (алиасинг).
-                float[] at8k = PcmConverter.downsample(raw, synth.sampleRate(), AUDIO_RATE);
-                byte[] pcm = PcmResampler.floatToBytes(at8k);
-                spoken += pcm.length / 2L;
-                if (!stream(pcm)) {
-                    return;
-                }
+            raw = synth.synthesize(text);
+        } catch (Throwable e) {
+            SPOKEN_FAILED.incrementAndGet();
+            log.warn("Синтез упал: {}", e.getMessage());
+            return;
+        }
+        if (raw == null || raw.length == 0) {
+            SPOKEN_FAILED.incrementAndGet();
+            log.debug("Синтез вернул пусто — фраза пропущена");
+            return;
+        }
+        // Вниз до 8 кГц с фильтром: без него голос пищит (алиасинг).
+        float[] at8k = PcmConverter.downsample(raw, synth.sampleRate(), AUDIO_RATE);
+        byte[] pcm = PcmResampler.floatToBytes(at8k);
+
+        speaking = true;   // с этого момента игнорируем микрофон
+        long start = System.currentTimeMillis();
+        try {
+            for (int offset = 0; offset < pcm.length && !closed; offset += FRAME_BYTES) {
+                int len = Math.min(FRAME_BYTES, pcm.length - offset);
+                out.write(TYPE_AUDIO);
+                out.write((len >> 8) & 0xFF);      // длина в заголовке — big endian
+                out.write(len & 0xFF);
+                out.write(pcm, offset, len);
+                out.flush();
+                sleepFrame();
             }
-            // «%.1f» требует дробного числа. Здесь раньше стояло spoken / AUDIO_RATE,
-            // где spoken — long: целочисленное деление даёт long, и String.format
-            // бросал IllegalFormatConversionException ПОСЛЕ того, как аудио уже
-            // ушло в сокет. Исключение вылетало из speak(), run() его не ловил,
-            // и поток озвучки умирал навсегда — тихо, без записи в лог.
-            SPOKEN_OK.incrementAndGet();
-            log.info("Озвучено {} с за {} мс: «{}»",
-                    String.format(java.util.Locale.ROOT, "%.1f", spoken / (double) AUDIO_RATE),
-                    System.currentTimeMillis() - start, brief(text));
         } catch (IOException e) {
             // Соединение оборвалось посередине фразы — дальше озвучивать некуда.
             failure = e;
             closed = true;
+            SPOKEN_FAILED.incrementAndGet();
             log.warn("Озвучка прервана ошибкой записи: {}", e.getMessage());
+            return;
         } finally {
-            pending.decrementAndGet();
+            // Сбрасываем флаг ТОЛЬКО здесь, чтобы при исключении не «залипнуть».
+            speaking = false;
+            lastSpokeAt = System.currentTimeMillis();
         }
+        SPOKEN_OK.incrementAndGet();
+        // Формат собираем строкой: в SLF4J нет {:.1f}, там только {} с toString().
+        log.info("Озвучено " + String.format("%.1f", pcm.length / 2.0 / AUDIO_RATE)
+                + " с за " + (System.currentTimeMillis() - start) + " мс: «"
+                + (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "»");
     }
 
     private void sleepFrame() {
@@ -286,31 +210,7 @@ class CallVoice {
         closed = true;
     }
 
-    /** Есть ли неозвученные фразы — диагностика. */
-    int pendingCount() {
-        return pending.get();
-    }
-
     IOException failure() {
         return failure;
-    }
-
-    /** Жив ли поток озвучки этого звонка. */
-    boolean isAlive() {
-        return alive;
-    }
-
-    /** Сколько фраз ушло в сокет с начала работы процесса. */
-    public static long spokenOk() {
-        return SPOKEN_OK.get();
-    }
-
-    /**
-     * Сколько фраз сорвалось и не озвучилось.
-     * Ненулевое значение означает, что озвучка ломалась и где-то в логах есть
-     * причина с уровнем ERROR.
-     */
-    public static long spokenFailed() {
-        return SPOKEN_FAILED.get();
     }
 }
