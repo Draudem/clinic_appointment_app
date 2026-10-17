@@ -194,6 +194,13 @@ class CallVoice {
         log.info("Озвучено " + String.format("%.1f", pcm.length / 2.0 / AUDIO_RATE)
                 + " с за " + (System.currentTimeMillis() - start) + " мс: «"
                 + (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "»");
+
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
     }
 
     private void sleepFrame() {

@@ -10,10 +10,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * Подбор свободного слота: пожелание пациента -> конкретный приём.
@@ -55,8 +52,14 @@ public class SlotResolver {
 
     /** Названия специальностей, по которым ведётся запись. */
     public List<String> availableSpecialties() {
-        return schedule.all(LocalDate.now(), LocalDate.now()).stream()
+        // Ищем не только на сегодня, но и на 14 дней вперед,
+        // чтобы список не был пустым, если сегодня выходной
+        LocalDate from = clock.today();
+        LocalDate to = from.plusDays(14);
+
+        return schedule.all(from, to).stream()
                 .map(ScheduleEntry::specialty)
+                .filter(Objects::nonNull)
                 .distinct()
                 .sorted()
                 .toList();
@@ -152,9 +155,17 @@ public class SlotResolver {
 
     /** Слот сегодняшний, до которого уже нельзя записаться. */
     private boolean inPast(ScheduleEntry e, LocalDate today) {
-        if (!e.date().equals(today)) return false;
-        LocalDateTime start = e.date().atTime(java.time.LocalTime.parse(e.time()));
-        return clock.now().isAfter(start.minusMinutes(SAME_DAY_MINUTES_BEFORE)); // <--- Используем часы МИС
+        if (!e.date().equals(today)) {
+            return false;
+        }
+        try {
+            LocalDateTime start = e.date().atTime(java.time.LocalTime.parse(e.time()));
+            return clock.now().isAfter(start.minusMinutes(SAME_DAY_MINUTES_BEFORE));
+        } catch (Exception ex) {
+            // Если время не парсится (например, "31.12.1899 13:40"),
+            // считаем, что слот не в прошлом, чтобы не ронять звонок.
+            return false;
+        }
     }
 
     private boolean free(ScheduleEntry e) {

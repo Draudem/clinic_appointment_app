@@ -105,14 +105,24 @@ public class ExcelScheduleProvider implements ScheduleProvider {
         try (InputStream in = Files.newInputStream(file);
              Workbook wb = WorkbookFactory.create(in)) {
 
-            // Ищем лист с расписанием (по умолчанию первый)
-            Sheet sheet = wb.getSheetAt(0);
+            // Ищем вкладку "Слоты", если ее нет — берем первую
+            Sheet sheet = wb.getSheet("Слоты");
+            if (sheet == null) {
+                sheet = wb.getSheetAt(0);
+                log.warn("Вкладка 'Слоты' не найдена, читаем первую: {}", wb.getSheetName(0));
+            } else {
+                log.info("Читаем вкладку: 'Слоты'");
+            }
+
             List<ScheduleEntry> parsed = parseSheet(sheet);
 
             cacheStamp = stamp;
             cache = List.copyOf(parsed);
             lastError = null;
-            log.info("Расписание из Excel прочитано: {} строк из {}", parsed.size(), file.getFileName());
+
+            // Добавляем лог для проверки
+            log.info("Расписание из Excel успешно прочитано. Найдено слотов: {}", parsed.size());
+
         } catch (Exception e) {
             lastError = "Ошибка чтения: " + e.getMessage();
             cache = List.of();
@@ -124,7 +134,7 @@ public class ExcelScheduleProvider implements ScheduleProvider {
     private List<ScheduleEntry> parseSheet(Sheet sheet) {
         List<ScheduleEntry> result = new ArrayList<>();
 
-        // Пропускаем заголовки (обычно 1-2 строки)
+        // Пропускаем заголовки (первая строка)
         int startRow = 1;
 
         for (int i = startRow; i <= sheet.getLastRowNum(); i++) {
@@ -132,30 +142,27 @@ public class ExcelScheduleProvider implements ScheduleProvider {
             if (row == null) continue;
 
             try {
-                // Предполагаем стандартные колонки:
-                // 0 - ID слота, 1 - Дата, 2 - День, 3 - ID врача, 4 - ФИО, 5 - Специальность, 6 - Отделение, 7 - Кабинет, 8 - Начало, 9 - Статус
+                // Колонки согласно скриншоту:
+                // 0 - ID, 1 - Дата, 2 - День, 3 - ID врача, 4 - ФИО, 5 - Специальность, 6 - Отделение, 7 - Кабинет, 8 - Время начала, 11 - Статус
+                String dateStr = getStringCell(row, 1);
+                String doctorIdStr = getStringCell(row, 3);
+                String fio = getStringCell(row, 4);
+                String specialty = getStringCell(row, 5);
+                String cabinetStr = getStringCell(row, 7);
+                String timeStr = getStringCell(row, 8); // Начало (например, 13:20)
+                String status = getStringCell(row, 11);  // Статус (например, Свободен)
 
-                String dateStr = getStringCell(row, 1); // Дата
-                String doctorIdStr = getStringCell(row, 3); // ID врача (D001)
-                String fio = getStringCell(row, 4); // ФИО
-                String specialty = getStringCell(row, 5); // Специальность
-                String cabinetStr = getStringCell(row, 7); // Кабинет
-                String timeStr = getStringCell(row, 8); // Время начала (HH:mm)
-                String status = getStringCell(row, 9); // Статус (Свободен)
-
-                // Проверяем, что слот свободен и дата корректна
-                if (status == null || !status.contains("Свободен")) continue;
+                // Ищем только свободные слоты
+                if (status == null || !status.toLowerCase().contains("свободен")) continue;
                 if (dateStr == null || timeStr == null) continue;
 
                 LocalDate date = LocalDate.parse(dateStr, DATE_FMT);
 
-                // Пропускаем прошедшие даты
+                // Не берем прошедшие даты
                 if (date.isBefore(LocalDate.now())) continue;
 
-                // Пытаемся найти врача в БД по ФИО (чтобы взять его ID)
-                // Или извлекаем цифры из D001 -> 1
                 Long doctorId = null;
-                if (doctorIdStr != null && doctorIdStr.matches("D\\d+")) {
+                if (doctorIdStr != null && doctorIdStr.matches("[Dd]\\d+")) {
                     doctorId = Long.parseLong(doctorIdStr.substring(1));
                 }
 
@@ -170,6 +177,7 @@ public class ExcelScheduleProvider implements ScheduleProvider {
                 // Игнорируем кривые строки
             }
         }
+        log.info("Распарсено слотов из Excel: {}", result.size());
         return result;
     }
 
@@ -180,7 +188,17 @@ public class ExcelScheduleProvider implements ScheduleProvider {
 
         if (cell.getCellType() == CellType.NUMERIC) {
             if (DateUtil.isCellDateFormatted(cell)) {
-                return cell.getLocalDateTimeCellValue().toLocalDate().format(DATE_FMT);
+                // Если ячейка отформатирована как дата, извлекаем только время (если это колонка времени)
+                // или только дату (если это колонка даты).
+                // Но проще: возвращаем отформатированную строку
+                java.time.LocalDateTime dateTime = cell.getLocalDateTimeCellValue();
+
+                // Если время 00:00, значит это просто дата
+                if (dateTime.toLocalTime().equals(java.time.LocalTime.MIDNIGHT)) {
+                    return dateTime.toLocalDate().format(DATE_FMT);
+                }
+                // Иначе возвращаем время в формате HH:mm
+                return dateTime.toLocalTime().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"));
             }
             return String.valueOf(cell.getNumericCellValue());
         }

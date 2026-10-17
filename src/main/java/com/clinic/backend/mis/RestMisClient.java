@@ -36,7 +36,16 @@ public class RestMisClient implements MisClient {
 
     public RestMisClient(MisProperties props) {
         this.props = props;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+        // Принудительно используем IPv4 (иногда в Linux-средах IPv6 отваливается)
+        System.setProperty("java.net.preferIPv4Stack", "true");
+
+        // Если в системе задан HTTP_PROXY, Java подхватит его
+        this.http = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(props.getTimeoutSeconds()))
+                .version(HttpClient.Version.HTTP_1_1) // Иногда HTTP/2 ломается на прокси
+                .build();
+
         log.info("Интеграция с МИС включена: {}", props.getBaseUrl());
     }
 
@@ -85,10 +94,14 @@ public class RestMisClient implements MisClient {
 
     private HttpResponse<String> send(String method, String path, String body) {
         rateLimit();
+        String url = props.getBaseUrl() + path;
+        log.info("МИС: {} {}", method, url); // <--- Логируем каждый запрос
+
         try {
-            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(props.getBaseUrl() + path))
+            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
                     .header("Authorization", "Bearer " + props.getToken())
                     .header("Content-Type", "application/json")
+                    .header("User-Agent", "ClinicVoiceAssistant/1.0")
                     .timeout(Duration.ofSeconds(props.getTimeoutSeconds()));
 
             if ("POST".equals(method)) b.POST(HttpRequest.BodyPublishers.ofString(body));
@@ -96,8 +109,12 @@ public class RestMisClient implements MisClient {
             else b.GET();
 
             HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+            log.info("МИС: ответ HTTP {}", res.statusCode()); // <--- Логируем ответ
+
             handleErrors(res);
             return res;
+        } catch (java.net.http.HttpConnectTimeoutException e) {
+            throw new MisUnavailableException("Таймаут подключения к МИС (нет доступа к " + props.getBaseUrl() + ")", e);
         } catch (Exception e) {
             throw new MisUnavailableException("Ошибка сети при запросе к МИС: " + e.getMessage(), e);
         }

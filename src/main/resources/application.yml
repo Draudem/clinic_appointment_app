@@ -35,7 +35,7 @@ app:
     enabled: ${MIS_ENABLED:true}
     base-url: ${MIS_BASE_URL:https://crm-med-mock.dbi-testing.ru/api/v1}
     token: ${MIS_TOKEN:}
-    timeout-seconds: ${MIS_TIMEOUT_SECONDS:10}
+    timeout-seconds: 20
     rate-limit-per-minute: ${MIS_RATE_LIMIT_PER_MINUTE:8}
 
   # NLU-этап: локальная ONNX-модель "текст -> semantic frame".
@@ -60,7 +60,7 @@ app:
   schedule:
     source: excel
     excel:
-      path: data/schedule.xlsx
+      path: /opt/goinfre/kindlyfr/Projects/VoiceAssistant/backend/data/schedule.xlsx
       sheet: ${SCHEDULE_EXCEL_SHEET:}
 
   # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
