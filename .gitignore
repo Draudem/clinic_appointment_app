@@ -1,58 +1,26 @@
-# Gradle
-.gradle/
+# Секреты
+.env
+*.env
+
+# Дампы БД и ПДн (152-ФЗ)
+backups/
+
+# Модели (тяжёлые, не в git)
+models/
+
+# Логи
+logs/
+
+# Сборка
 build/
-!gradle/wrapper/gradle-wrapper.jar
+.gradle/
+out/
 
 # IDE
 .idea/
 *.iml
 .vscode/
-out/
 
-# Состояние локального запуска (deploy/dev-up.sh, deploy/dev-down.sh)
-.local-run/
-
-# Локальные секреты (в Docker переопределяются переменными окружения)
-.env
-
-# JAR, скопированный в deploy/ для отправки на сервер
-deploy/*.jar
-
-# Файлы NLU-модели, попадающие в deploy/ при подготовке к сборке образа
-# (в репозитории они не хранятся — источник: ai_model/clinic_lm/models/)
-deploy/model.onnx
-deploy/tokenizer.json
-
-# STT-модель GigaAM (~236 МБ) — качается отдельно, в git не попадает.
-# См. deploy/fetch-stt-model.sh
-models/stt/
-
-# Модель синтеза речи Piper (~37 МБ) — качается отдельно.
-# См. deploy/fetch-tts-model.sh
-models/tts/
-
-# Те же файлы, скопированные в deploy/ при подготовке к сборке образа.
-# deploy-local.sh кладёт их рядом с Dockerfile, откуда их COPYит.
-# Без этих правил в коммит уехало бы ~240 МБ.
-deploy/model.int8.onnx
-deploy/tokens.txt
-
-# Нативная libonnxruntime.so для sherpa-onnx (~15 МБ) — качается отдельно.
-# См. deploy/fetch-stt-libs.sh
-lib/*.so
-lib/*.so.*
-deploy/libonnxruntime.so
-
-# Тестовое расписание Excel — генерируется командой ./gradlew genSchedule,
-# в репозитории ему не место: настоящий файл присылает поликлиника.
-data/
-
-# NLU-модель и токенизатор (~24 МБ) — в репозиторий не кладутся.
-# Собираются из исходников коллеги: deploy/export-nlu-model.sh
-models/nlu/
-
-logs
-
-# Дампы базы: содержат пароли (users.password) и транскрипты разговоров.
-# Готовятся вручную: pg_dump -h 127.0.0.1 -U clinic -d clinic --schema=public
-# backups/
+# OS
+.DS_Store
+Thumbs.db
