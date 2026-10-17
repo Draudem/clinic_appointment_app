@@ -213,4 +213,21 @@ class CallVoice {
     IOException failure() {
         return failure;
     }
+
+    /**
+     * Жив ли поток озвучки.
+     * (Нужно для тестов, чтобы убедиться, что мы не уронили поток ошибкой синтеза).
+     */
+    public boolean isAlive() {
+        // В текущей реализации поток создается в конструкторе.
+        // Если он не завершился (closed == false), значит он жив.
+        return !closed;
+    }
+
+    /**
+     * Сколько фраз еще стоит в очереди на озвучку.
+     */
+    public int pendingCount() {
+        return queue.size();
+    }
 }
