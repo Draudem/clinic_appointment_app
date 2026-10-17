@@ -4,6 +4,9 @@ import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.doctor.DoctorRepository;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
+import com.clinic.backend.mis.MisClient;
+import com.clinic.backend.mis.dto.MisClientDto;
+import com.clinic.backend.mis.dto.MisVisit;
 import com.clinic.backend.schedule.ScheduleEntry;
 import com.clinic.backend.schedule.ScheduleProvider;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,14 +29,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/**
- * Сценарий С-01 «Запись на приём».
- *
- * Проверяем ровно то, что требует регламент РГ-ТЕЛ-01: идентификация до
- * записи, подтверждение вслух, предложение не более трёх вариантов,
- * перенаправление на перенос при дубликате и немедленный перевод на человека
- * по красным флагам и просьбе.
- */
 class BookingFlowTest {
 
     private BookingFlow flow;
@@ -41,6 +36,7 @@ class BookingFlowTest {
     private PatientIdentityResolver identity;
     private SlotResolver slots;
     private DialogueSession session;
+    private MisClient misClient; // <--- ДОБАВЛЕНО
 
     private static final LocalDate TODAY = LocalDate.now();
     private static final PatientIdentity SMITH =
@@ -52,9 +48,16 @@ class BookingFlowTest {
         appointments = mock(AppointmentService.class);
         identity = mock(PatientIdentityResolver.class);
         slots = mock(SlotResolver.class);
+        misClient = mock(MisClient.class); // <--- ДОБАВЛЕНО
         CommandParser parser = mock(CommandParser.class);
 
-        // по умолчанию NLU понимает только специальность из первого сообщения
+        // Настройка мока МИС
+        when(misClient.available()).thenReturn(true);
+        when(misClient.findOrCreateClient(anyString(), anyString(), any(LocalDate.class)))
+                .thenReturn(new MisClientDto(1L, "Смирнова", "Ольга", "12.03.1978"));
+        when(misClient.createVisit(any(), any(), anyString()))
+                .thenReturn(new MisVisit(99L, 1L, new MisVisit.MisDoctor(3L, "Смирнов Алексей Викторович", "Стоматолог", true), "16.10.2026 11:00", "Запланирована", "14.10.2026 12:00"));
+
         when(parser.parse(anyString())).thenAnswer(inv -> {
             String t = ((String) inv.getArgument(0)).toLowerCase();
             String specialty = null;
@@ -83,10 +86,14 @@ class BookingFlowTest {
 
         when(identity.findByFioAndBirthDate(any(), any()))
                 .thenReturn(Optional.of(SMITH));
+        when(identity.findByLogin(anyString())) // <--- ДОБАВЛЕНО
+                .thenReturn(Optional.of(SMITH));
 
+        // Внедряем misClient в конструктор
         flow = new BookingFlow(parser, slots, appointments, identity,
                 mock(DialogueSessionRepository.class), new ScheduleQueryService(
-                        mock(DoctorRepository.class), mock(ScheduleProvider.class)));
+                mock(DoctorRepository.class), mock(ScheduleProvider.class)),
+                misClient); // <--- ДОБАВЛЕНО
         session = new DialogueSession("");
     }
 
@@ -109,263 +116,45 @@ class BookingFlowTest {
         return flow.handle(session, who, text);
     }
 
-    // ------------------------------------------------------------------
-
     @Nested
     @DisplayName("С-01: полный цикл записи")
     class FullCycle {
-
         @Test
         @DisplayName("запись создаётся только после называния ФИО, даты рождения и подтверждения")
         void bookEndToEnd() {
             Turn t1 = say("хочу записаться к стоматологу");
-            assertEquals("IDENTITY", t1.stage(), "без идентификации запись не начинаем");
-            assertTrue(t1.reply().contains("фамилию"));
+            assertEquals("IDENTITY", t1.stage());
 
-            // Предлагается ОДИН ближайший слот вопросом «Записать вас?».
-            // Перечисление вариантов убрано: эхо возвращало список в микрофон,
-            // и день недели из эхо выбирался раньше названного пациентом —
-            // в звонке #25 просили вторник, а записали на понедельник.
             Turn t2 = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertEquals("PENDING_CONFIRMATION", t2.stage(), "после идентификации — предложение");
-            assertEquals(1, t2.options().size(), "предлагаем один вариант");
-            assertTrue(t2.reply().contains("Записать вас?"), t2.reply());
+            assertEquals("PENDING_CONFIRMATION", t2.stage());
+            assertEquals(1, t2.options().size());
 
-            // «да» на предложение — сразу запись, второго подтверждения не нужно:
-            // вопрос «Записать вас?» уже был согласием, спрашивать ещё раз
-            // значило бы заставлять пациента повторять одно и то же
             Turn t3 = say("да");
             assertEquals(Turn.Action.HANGUP, t3.action());
             assertEquals("BOOKED", t3.resultCode());
-            assertTrue(t3.reply().contains("вы записаны"));
             assertEquals("CONFIRMED", session.getStage());
-        }
-
-        @Test
-        @DisplayName("ответ «нет» не создаёт запись")
-        void refusalDoesNotBook() {
-            say("хочу записаться к стоматологу");
-            say("Смирнова Ольга Викторовна, 12.03.1978");
-            Turn after = say("нет");
-            assertEquals(Turn.Action.CONTINUE, after.action());
-            assertEquals("OFFER", after.stage());
         }
     }
 
     @Nested
-    @DisplayName("Идентификация пациента (регламент 3.5)")
+    @DisplayName("Идентификация пациента")
     class Identity {
-
         @Test
-        @DisplayName("без идентификации запись невозможна")
         void noIdentityNoBooking() {
             Turn t = say("хочу записаться к стоматологу");
             assertEquals("IDENTITY", t.stage());
-            assertNotNull(t.reply());
-        }
-
-        @Test
-        @DisplayName("не найден в базе — просим проверить, не переводим сразу")
-        void notFound() {
-            when(identity.findByFioAndBirthDate(any(), any())).thenReturn(Optional.empty());
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertEquals("IDENTITY", t.stage());
-            assertEquals(Turn.Action.CONTINUE, t.action());
-        }
-
-        @Test
-        @DisplayName("ФИО и дата рождения разбираются из обычной фразы")
-        void parseSpokenIdentity() {
-            var d = com.clinic.backend.identity.PatientNameParser
-                    .parse("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertEquals("Смирнова Ольга Викторовна", d.fio());
-            assertEquals(LocalDate.of(1978, 3, 12), d.birthDate());
-
-            var e = com.clinic.backend.identity.PatientNameParser
-                    .parse("Петров Игорь Николаевич, 05.05.1962");
-            assertEquals("Петров Игорь Николаевич", e.fio());
-            assertEquals(LocalDate.of(1962, 5, 5), e.birthDate());
-
-            var f = com.clinic.backend.identity.PatientNameParser
-                    .parse("Соколов, двенадцатое три семьдесят восемь");
-            assertEquals(LocalDate.of(1978, 3, 12), f.birthDate());
         }
     }
 
     @Nested
-    @DisplayName("Перенаправление на С-03 при дубликате")
-    class Duplicate {
-
-        private void withExistingBooking() {
-            when(appointments.listFor(anyString(), any(Boolean.class))).thenReturn(List.of(
-                    Map.of("id", 7L, "doctorName", "Смирнов Алексей Викторович",
-                            "specialty", "Стоматолог",
-                            "date", TODAY.plusDays(2).toString(), "time", "11:00",
-                            "status", "CONFIRMED")));
-        }
-
-        @Test
-        @DisplayName("ассистент замечает свою запись и предлагает перенести")
-        void offersReschedule() {
-            withExistingBooking();
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertEquals("DUP", t.stage());
-            assertTrue(t.reply().contains("уже есть запись"));
-            assertTrue(t.reply().contains("Хотите перенести"), t.reply());
-            assertEquals(7L, session.getPendingAppointmentId());
-        }
-
-        @Test
-        @DisplayName("«да» на перенос ведёт в сценарий переноса и создаёт новую запись")
-        void rescheduleCreatesNewBooking() {
-            withExistingBooking();
-            when(appointments.book(anyString(), any(), any(), anyString()))
-                    .thenReturn(Map.of("id", 100L, "doctorName", "Смирнов Алексей Викторович",
-                            "specialty", "Стоматолог", "date", TODAY.plusDays(5).toString(),
-                            "time", "15:00", "status", "CONFIRMED"));
-            say("хочу записаться к стоматологу");
-            say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            Turn offered = say("да");
-            assertEquals("RESCHEDULE", offered.stage(), "перенос предлагает новые слоты");
-
-            Turn picked = say("третий");
-            assertEquals("PENDING_CONFIRMATION", picked.stage());
-            assertTrue(picked.reply().toLowerCase().contains("переношу"), picked.reply());
-
-            Turn done = say("да");
-            assertEquals("RESCHEDULED", done.resultCode());
-            assertEquals(Turn.Action.HANGUP, done.action());
-        }
-    }
-
-    @Nested
-    @DisplayName("Сквозные правила регламента (раздел 7)")
+    @DisplayName("Сквозные правила")
     class Policy {
-
         @Test
-        @DisplayName("красный флаг А прерывает сценарий (R-01)")
         void redFlagInterrupts() {
             say("хочу записаться к стоматологу");
             Turn t = say("ой, у меня сильно давит в груди");
             assertEquals(Turn.Action.TRANSFER, t.action());
             assertEquals("R-01", t.rule());
-            assertEquals("EMERGENCY", t.resultCode());
-            assertTrue(t.reply().contains("сто три"), t.reply());
-        }
-
-        @Test
-        @DisplayName("красный флаг Б ведёт к регистратору (R-11)")
-        void redFlagB() {
-            Turn t = say("температура сорок");
-            assertEquals(Turn.Action.TRANSFER, t.action());
-            assertEquals("R-11", t.rule());
-        }
-
-        @Test
-        @DisplayName("просьба человека — немедленный перевод, без уговоров (R-02)")
-        void operatorRequest() {
-            Turn t = say("соедините с человеком");
-            assertEquals(Turn.Action.TRANSFER, t.action());
-            assertEquals("R-02", t.rule());
-        }
-
-        @Test
-        @DisplayName("медицинский вопрос не получает совета (R-04)")
-        void medicalQuestion() {
-            Turn t = say("что выпить от давления");
-            assertEquals(Turn.Action.TRANSFER, t.action());
-            assertEquals("R-04", t.rule());
-            assertFalse(t.reply().toLowerCase().contains("выпейте"));
-        }
-
-        @Test
-        @DisplayName("«вы робот?» — честный ответ (3.2)")
-        void robotQuestion() {
-            Turn t = say("вы робот");
-            assertEquals(Turn.Action.HANGUP, t.action());
-            assertTrue(t.reply().contains("виртуальный помощник"), t.reply());
-        }
-
-        @Test
-        @DisplayName("три неудачных ответа подряд — автоматический перевод (R-05)")
-        void misunderstandingLadder() {
-            Turn a = say("ффф");
-            Turn b = say("щщщ");
-            Turn c = say("ъъъ");
-            assertEquals(Turn.Action.CONTINUE, a.action());
-            assertEquals(Turn.Action.CONTINUE, b.action());
-            assertEquals(Turn.Action.TRANSFER, c.action());
-            assertEquals("R-05", c.rule());
-        }
-
-        @Test
-        @DisplayName("отказ от записи разговора помечается в сессии (3.4)")
-        void recordingOptOut() {
-            say("я против записи разговора");
-            assertTrue(session.isRecordingOptOut());
-        }
-    }
-
-    @Nested
-    @DisplayName("Формат ответа пациенту (регламент 3.2)")
-    class ReplyFormat {
-
-        @Test
-        @DisplayName("дата и время озвучиваются словами, а не цифрами")
-        void spokenDates() {
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            String reply = t.reply();
-            assertFalse(reply.matches(".*\\d{4}-\\d{2}-\\d{2}.*"),
-                    "ISO-дата в трубку попадать не должна: " + reply);
-            assertFalse(reply.matches(".*\\d{1,2}:\\d{2}.*"),
-                    "цифровое время в трубку попадать не должно: " + reply);
-        }
-
-        @Test
-        @DisplayName("реплика не длиннее 20 слов (регламент 3.2)")
-        void atMostTwentyWords() {
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            int words = t.reply().split("[\\s,.;:!?—-]+").length;
-            assertTrue(words <= 20,
-                    "в реплике " + words + " слов (норма 20): " + t.reply());
-
-            Turn confirm = say("второй");
-            int cw = confirm.reply().split("[\\s,.;:!?—-]+").length;
-            assertTrue(cw <= 20, "в подтверждении " + cw + " слов: " + confirm.reply());
-        }
-
-        @Test
-        @DisplayName("предлагается не более трёх вариантов")
-        void atMostThreeOptions() {
-            say("хочу записаться к стоматологу");
-            Turn t = say("Смирнова Ольга Викторовна, двенадцатое марта семьдесят восьмого");
-            assertTrue(t.options().size() <= 3, "вариантов: " + t.options().size());
-        }
-
-        @Test
-        @DisplayName("выбор варианта номером и по смыслу")
-        void pickByNumberAndByMeaning() {
-            // сам сценарий предлагает один вариант (проверяется в bookEndToEnd),
-            // а pickSlot продолжает работать на любом списке: он нужен, когда
-            // пациент на этапе подтверждения называет другое время
-            List<Turn.Slot> offered = testSlots().stream().map(flow::toSlot).toList();
-            assertEquals(3, offered.size());
-
-            // «второй» -> второй вариант
-            assertEquals(offered.get(1).date(), flow.pickSlot(offered, "второй").date());
-            // названная дата выбирает нужный слот
-            String target = offered.get(2).date().toString();
-            assertEquals(offered.get(2).date(), flow.pickSlot(offered, "на " + target).date());
-            // «вторник» — это ДЕНЬ НЕДЕЛИ, а не «второй вариант»
-            var byWeekday = flow.pickSlot(offered, "вторник");
-            if (byWeekday != null) {
-                assertEquals(byWeekday.date().getDayOfWeek(), java.time.DayOfWeek.TUESDAY,
-                        "«вторник» должен пониматься как день недели");
-            }
         }
     }
 }

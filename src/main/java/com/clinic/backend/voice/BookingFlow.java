@@ -2,15 +2,22 @@ package com.clinic.backend.voice;
 
 import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.identity.PatientIdentity;
-import com.clinic.backend.rag.ClinicalKnowledgeBase;
 import com.clinic.backend.identity.PatientIdentityResolver;
 import com.clinic.backend.identity.PatientNameParser;
+import com.clinic.backend.mis.MisBadRequestException;
+import com.clinic.backend.mis.MisClient;
+import com.clinic.backend.mis.MisConflictException;
+import com.clinic.backend.mis.MisUnavailableException;
+import com.clinic.backend.mis.dto.MisClientDto;
+import com.clinic.backend.mis.dto.MisVisit;
+import com.clinic.backend.rag.ClinicalKnowledgeBase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -18,40 +25,15 @@ import java.util.Optional;
 
 /**
  * Сценарий С-01 «Запись на приём» по регламенту РГ-ТЕЛ-01.
- *
- * ПОРЯДОК ШАГОВ (раздел 5, С-01):
- *   1. сквозные правила — красные флаги, просьба человека, жалоба, медвопрос;
- *   2. лестница непонимания R-05;
- *   3. идентификация пациента (3.5) — без неё запись не выполняется;
- *   4. проверка дубликата: есть активная запись на эту специальность —
- *      предложить перенос (переход в С-03);
- *   5. подбор и предложение слотов (не более трёх);
- *   6. выбор слота и подтверждение вслух;
- *   7. создание записи и SMS.
- *
- * Сценарий НЕ разбирает реплику сам: интент и специальность приходят от
- * {@link CommandParser}, время — от {@link TimeResolver}. Замена любого из
- * этих этапов на заглушку или на более сильную модель не меняет здесь ничего.
  */
 @Service
 public class BookingFlow {
 
     private static final Logger log = LoggerFactory.getLogger(BookingFlow.class);
 
-    /**
-     * Сколько вариантов называть за раз.
-     *
-     * <p>С-03 (перенос) — три: регламент прямо велит «Перечислить не более трёх
-     * (специальность, дата), спросить, какую переносить».
-     *
-     * <p>С-01 (запись) — один. Регламент 3.2 разрешает «не более трёх», то есть
-     * один не противоречит. А перечисление вредило: эхо отозванного списка
-     * возвращалось в микрофон, и в распознанной фразе «в пятницу… В ПОНЕДЕЛЬНИК…
-     * вторник» день выбирался первым найденным — то есть чужим. В звонке #25
-     * пациент просил вторник, а его записали на понедельник.
-     */
     private static final int RESCHEDULE_OPTIONS = 3;
     private static final int BOOKING_OPTIONS = 1;
+    private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
     private final CommandParser parser;
     private final SlotResolver slots;
@@ -59,21 +41,22 @@ public class BookingFlow {
     private final PatientIdentityResolver identity;
     private final DialogueSessionRepository sessions;
     private final ScheduleQueryService scheduleQueries;
+    private final MisClient misClient;
 
     public BookingFlow(CommandParser parser, SlotResolver slots, AppointmentService appointments,
                        PatientIdentityResolver identity, DialogueSessionRepository sessions,
-                       ScheduleQueryService scheduleQueries) {
+                       ScheduleQueryService scheduleQueries, MisClient misClient) {
         this.parser = parser;
         this.slots = slots;
         this.appointments = appointments;
         this.identity = identity;
         this.sessions = sessions;
         this.scheduleQueries = scheduleQueries;
+        this.misClient = misClient;
     }
 
     @Transactional
     public Turn handle(DialogueSession session, PatientIdentity who, String text) {
-        // --- 1. Сквозные правила: проверяются на каждой реплике ---
         PolicyRules.Verdict verdict = PolicyRules.check(text);
         if (PolicyRules.isRecordingOptOut(text)) {
             session.setRecordingOptOut(true);
@@ -94,9 +77,6 @@ public class BookingFlow {
                     session.getStage(), List.of(), verdict.rule(), verdict.resultCode(), 0);
         }
 
-        // --- 2. Неразборчивая реплика: лестница R-05 ---
-        // На этапах подтверждения ответ «да» вовсе не похож на речь,
-        // и проверять его на «шум» бессмысленно.
         if (!PolicyRules.expectsYesNo(session.getStage()) && PolicyRules.isGarbage(text)) {
             session.increaseMisses();
             int misses = session.getMissCount();
@@ -112,7 +92,6 @@ public class BookingFlow {
         session.append("пациент", text);
         session.incrementExchanges();
 
-        // --- 3. Обработка по этапу ---
         return switch (session.getStage() == null ? "SPECIALTY" : session.getStage()) {
             case "PENDING_CONFIRMATION" -> onConfirm(session, text);
             case "OFFER" -> onOfferChoice(session, text);
@@ -124,27 +103,10 @@ public class BookingFlow {
         };
     }
 
-    // ------------------------------------------------------------------
-    // С-07. Справка о графике работы
-    // ------------------------------------------------------------------
-
-    /**
-     * Ответ на вопрос о графике.
-     *
-     * Регламент требует для С-07 ровно двух вещей: сообщить сведения
-     * (INFO_GIVEN) и предложить запись. Поэтому почти на каждый ответ
-     * добавляется «Записать вас?», а этап переходит в SCHEDULE_OFFER —
-     * ждёт ответа. На «нет» произносится прощание из примера диалога,
-     * на «да» запись продолжается с уже названной специальностью.
-     *
-     * Идентификация на этом шаге не выполняется: карточка С-07 в регламенте
-     * прямо говорит «Идентификация: не требуется».
-     */
     private Turn onScheduleInfo(DialogueSession session, PatientIdentity who,
                                 ScheduleInfoRule.ScheduleInfo info) {
         Optional<ScheduleQueryService.Reply> answer = scheduleQueries.answer(info);
         if (answer.isEmpty()) {
-            // отвечать не на что — разбираем фразу обычным порядком
             return onIntent(session, who, info.text());
         }
         ScheduleQueryService.Reply reply = answer.get();
@@ -160,17 +122,14 @@ public class BookingFlow {
         return Turn.continueWith(reply.text(), session.getStage(), List.of(), 0);
     }
 
-    /** Ответ на предложение записи после справки о графике. */
     private Turn onScheduleOffer(DialogueSession session, PatientIdentity who, String text) {
         PolicyRules.Answer answer = PolicyRules.answer(text);
         session.setStage("SPECIALTY");
         if (answer == PolicyRules.Answer.YES) {
             String specialty = session.getSpecialty();
             if (specialty == null || specialty.isBlank()) {
-                // специальность не была названа — обычный путь спросит её
                 return onIntent(session, who, text);
             }
-            // специальность уже известна, продолжаем запись с неё
             return afterSpecialty(session, who, null);
         }
         if (answer == PolicyRules.Answer.NO) {
@@ -179,20 +138,10 @@ public class BookingFlow {
             session.append("ассистент", bye);
             return Turn.continueWith(bye, "DONE", List.of(), 0);
         }
-        // «да/нет» не понято — возвращаемся к вопросу о специальности
         return onIntent(session, who, text);
     }
 
-    // ------------------------------------------------------------------
-    // Шаг: понять намерение и специальность
-    // ------------------------------------------------------------------
-
     private Turn onIntent(DialogueSession session, PatientIdentity who, String text) {
-        // С-07 идёт ПЕРЕД моделью. Проверка нужна не для красоты: вопрос про
-        // график — это правило, которое нельзя отдать на волю модели, потому
-        // что и предыдущая, и новая версия на части таких фраз отвечали
-        // <UNSUPPORTED> или, что хуже, <BOOK>. Спросили «работает ли сегодня
-        // хирург» — пациент должен получить справку, а не попасть в запись.
         Optional<ScheduleInfoRule.ScheduleInfo> schedule = ScheduleInfoRule.detect(text);
         if (schedule.isPresent()) {
             return onScheduleInfo(session, who, schedule.get());
@@ -220,43 +169,30 @@ public class BookingFlow {
             return Turn.continueWith(reply, "SPECIALTY", List.of(), 0);
         }
 
-        // от «мне к стоматологу на пятницу» сразу запоминаем пожелание о времени
         rememberTime(session, parsed, text);
-
-        // если пациент сразу назвал конкретный слот — сразу к подтверждению
         Optional<Turn.Slot> exact = findExact(session, specialty, parsed, text);
 
         return afterSpecialty(session, who, exact.orElse(null));
     }
 
-    /** Запоминает дату/время, названные вместе со специальностью. */
     private void rememberTime(DialogueSession session, ParsedCommand parsed, String text) {
         LocalDate today = LocalDate.now();
-        TimeResolver.TimePreference pref =
-                TimeResolver.resolve(parsed.timeFactors(), text, today);
+        TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         session.setWantedDate(pref.date() == null ? null : pref.date().toString());
         session.setWantedTime(pref.exact());
     }
 
-    /** Если пациент назвал конкретное время, подбираем именно его. */
     private Optional<Turn.Slot> findExact(DialogueSession session, String specialty,
                                           ParsedCommand parsed, String text) {
         LocalDate today = LocalDate.now();
-        TimeResolver.TimePreference pref =
-                TimeResolver.resolve(parsed.timeFactors(), text, today);
+        TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         if (pref.isEmpty()) {
             return Optional.empty();
         }
         return slots.findSlot(specialty, pref, today).map(this::toSlot);
     }
 
-    // ------------------------------------------------------------------
-    // Шаг: после того как специальность известна
-    // ------------------------------------------------------------------
-
-    private Turn afterSpecialty(DialogueSession session, PatientIdentity who,
-                                Turn.Slot chosen) {
-        // --- 3. Идентификация ---
+    private Turn afterSpecialty(DialogueSession session, PatientIdentity who, Turn.Slot chosen) {
         if (!who.identified()) {
             String reply = "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.";
             session.setStage("IDENTITY");
@@ -268,28 +204,23 @@ public class BookingFlow {
 
         String greeting = who.addressName().isBlank() ? "" : "Спасибо, " + who.addressName() + ". ";
 
-        // --- 4. Проверка дубликата ---
         Optional<Map<String, Object>> dup = activeBooking(who, session.getSpecialty());
         if (dup.isPresent()) {
             return offerMove(session, greeting, dup.get());
         }
 
-        // --- конкретный слот сразу к подтверждению ---
         if (chosen != null) {
             return toConfirm(session, greeting + "Записываю: ", chosen);
         }
 
-        // --- 5. Предложить слоты ---
         return offerSlots(session, greeting);
     }
 
     private Turn offerSlots(DialogueSession session, String greeting) {
         LocalDate today = LocalDate.now();
         TimeResolver.TimePreference pref = from(session);
-        List<SlotResolver.Slot> found = slots.offerSlots(
-                session.getSpecialty(), pref, today, BOOKING_OPTIONS);
+        List<SlotResolver.Slot> found = slots.offerSlots(session.getSpecialty(), pref, today, BOOKING_OPTIONS);
         if (found.isEmpty()) {
-            // С-11: нет слотов в горизонте — лист ожидания, а не выдуманная запись
             String reply = greeting + "Свободного времени в ближайшие две недели нет. "
                     + "Могу поставить вас в лист ожидания и перезвонить.";
             session.setStage("OFFER");
@@ -297,20 +228,12 @@ public class BookingFlow {
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
         }
-        // Один вариант: называем дату и спрашиваем, как требует регламент
-        // в формулировке «Записать вас?». Этап сразу подтверждения — там
-        // сценарий ждёт ответа и правило «последнее слово решает» работает.
         return offerBooking(session, greeting, toSlot(found.get(0)));
     }
-
-    // ------------------------------------------------------------------
-    // Шаг: ответ на предложенные слоты
-    // ------------------------------------------------------------------
 
     private Turn onOfferChoice(DialogueSession session, String text) {
         List<Turn.Slot> offered = decode(session.getOfferedSlots());
         if (offered.isEmpty()) {
-            // Варианты ещё не предлагали: показать их, а не спрашивать «выберите из списка»
             return offerSlots(session, "");
         }
         Turn.Slot picked = pickSlot(offered, text);
@@ -323,101 +246,62 @@ public class BookingFlow {
         return toConfirm(session, "", picked);
     }
 
-    /**
-     * Выбор слота из предложенных.
-     *
-     * Сначала по номеру («второй», «2»), затем по смыслу — по названной дате,
-     * дню недели или времени. Номер важно проверять ПОСЛЕ смысла: слово
-     * «вторник» означает день недели, а не «второй вариант».
-     */
     Turn.Slot pickSlot(List<Turn.Slot> offered, String text) {
-        if (offered.isEmpty() || text == null) {
-            return null;
-        }
+        if (offered.isEmpty() || text == null) return null;
         String q = ClinicalKnowledgeBase.normalize(text);
-
-        // 1. названная дата или день недели
         LocalDate today = LocalDate.now();
         LocalDate saidDate = RussianTime.parseDayMonth(q, today);
-        if (saidDate == null) {
-            saidDate = RussianTime.parseNumericDate(q, today);
-        }
-        if (saidDate == null && q.contains("завтра")) {
-            saidDate = today.plusDays(1);
-        }
-        if (saidDate == null && q.contains("послезавтра")) {
-            saidDate = today.plusDays(2);
-        }
-        if (saidDate == null) {
-            saidDate = byWeekday(q, today);
-        }
-        // 2. названное время
+        if (saidDate == null) saidDate = RussianTime.parseNumericDate(q, today);
+        if (saidDate == null && q.contains("завтра")) saidDate = today.plusDays(1);
+        if (saidDate == null && q.contains("послезавтра")) saidDate = today.plusDays(2);
+        if (saidDate == null) saidDate = byWeekday(q, today);
+
         String saidTime = null;
         java.time.LocalTime digits = RussianTime.parseHhmm(q);
         if (digits != null) {
             saidTime = HHMM.format(digits);
         } else if (looksLikeTime(q)) {
-            // Без этого «второй» читался как «два часа» -> 02:00, и выбор варианта
-            // по номеру переставал работать вовсе.
             java.time.LocalTime words = RussianTime.parseWordsTime(q);
-            if (words != null) {
-                saidTime = HHMM.format(words);
-            }
+            if (words != null) saidTime = HHMM.format(words);
         }
 
         if (saidDate != null || saidTime != null) {
             for (Turn.Slot s : offered) {
                 boolean dateOk = saidDate == null || saidDate.equals(s.date());
                 boolean timeOk = saidTime == null || saidTime.equals(s.time());
-                if (dateOk && timeOk) {
-                    return s;
-                }
+                if (dateOk && timeOk) return s;
             }
         }
-        // 3. порядковый номер — только если ничего не названо словами
         boolean namedSomething = saidDate != null || saidTime != null
                 || containsWeekdayWord(q, today) || RussianTime.partOfDay(q) != null;
         if (!namedSomething) {
             Integer idx = PolicyRules.ordinalChoice(text);
-            if (idx != null && idx >= 0 && idx < offered.size()) {
-                return offered.get(idx);
-            }
+            if (idx != null && idx >= 0 && idx < offered.size()) return offered.get(idx);
         }
-        // 4. единственный вариант и ответ «да»
         if (offered.size() == 1 && PolicyRules.answer(text) == PolicyRules.Answer.YES) {
             return offered.get(0);
         }
         return null;
     }
 
-    /** Явный признак того, что пациент назвал именно время, а не количество. */
     private static boolean looksLikeTime(String q) {
-        for (String mark : new String[]{"час", "утра", "вечера", "дня", "ночи", "дня",
-                "во сколько", "во сколько"}) {
-            if (q.contains(mark)) {
-                return true;
-            }
+        for (String mark : new String[]{"час", "утра", "вечера", "дня", "ночи", "дня", "во сколько"}) {
+            if (q.contains(mark)) return true;
         }
         return false;
     }
 
-    private static final java.time.format.DateTimeFormatter HHMM =
-            java.time.format.DateTimeFormatter.ofPattern("HH:mm");
+    private static final java.time.format.DateTimeFormatter HHMM = java.time.format.DateTimeFormatter.ofPattern("HH:mm");
 
     private LocalDate byWeekday(String q, LocalDate today) {
         for (java.time.DayOfWeek d : java.time.DayOfWeek.values()) {
             String stem = switch (d) {
-                case MONDAY -> "понедельник";
-                case TUESDAY -> "вторник";
-                case WEDNESDAY -> "сред";
-                case THURSDAY -> "четверг";
-                case FRIDAY -> "пятниц";
-                case SATURDAY -> "суббот";
+                case MONDAY -> "понедельник"; case TUESDAY -> "вторник";
+                case WEDNESDAY -> "сред"; case THURSDAY -> "четверг";
+                case FRIDAY -> "пятниц"; case SATURDAY -> "суббот";
                 case SUNDAY -> "воскресень";
             };
-            if (q.contains(stem)) {
-                return RussianTime.nextWeekday(today, d);
-            }
+            if (q.contains(stem)) return RussianTime.nextWeekday(today, d);
         }
         return null;
     }
@@ -426,17 +310,11 @@ public class BookingFlow {
         return byWeekday(q, today) != null;
     }
 
-    // ------------------------------------------------------------------
-    // Шаг: подтверждение
-    // ------------------------------------------------------------------
-
     private Turn toConfirm(DialogueSession session, String prefix, Turn.Slot picked) {
         session.setPendingAction("BOOK");
         session.setPendingDoctorId(picked.doctorId());
         session.setPendingDate(picked.date().toString());
         preparePending(session, picked);
-        // «Записать вас?» — формулировка регламента (раздел 4, встречается
-        // десять раз). Раньше здесь было «Записываю? Ответьте «да» или «нет»»
         String reply = prefix.isEmpty()
                 ? picked.spoken() + ". Записать вас?"
                 : prefix + picked.spoken() + ". Верно?";
@@ -444,13 +322,6 @@ public class BookingFlow {
         return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
     }
 
-    /**
-     * Предложение записи на один слот: «Спасибо, Игорь Николаевич.
-     * В пятницу, в девять. Записать вас?»
-     *
-     * <p>Этап сразу подтверждения, а не перечисления: ждём «да» или «нет»,
-     * и правило «последнее сказанное слово решает» применяется как задумано.
-     */
     private Turn offerBooking(DialogueSession session, String greeting, Turn.Slot picked) {
         preparePending(session, picked);
         String reply = greeting + picked.spoken() + ". Записать вас?";
@@ -458,7 +329,6 @@ public class BookingFlow {
         return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
     }
 
-    /** Готовит слот к подтверждению: что именно мы собираемся записать. */
     private void preparePending(DialogueSession session, Turn.Slot picked) {
         session.setPendingAction("BOOK");
         session.setPendingDoctorId(picked.doctorId());
@@ -472,8 +342,6 @@ public class BookingFlow {
 
     private Turn onConfirm(DialogueSession session, String text) {
         PolicyRules.Answer answer = PolicyRules.answer(text);
-
-        // пациент ответил не «да/нет», а назвал другое время или специальность
         if (answer == PolicyRules.Answer.UNKNOWN) {
             List<Turn.Slot> offered = decode(session.getOfferedSlots());
             Turn.Slot another = pickSlot(offered, text);
@@ -484,16 +352,13 @@ public class BookingFlow {
             if ("BOOK".equals(session.getPendingAction()) && session.getSpecialty() != null) {
                 LocalDate today = LocalDate.now();
                 TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
-                Optional<Turn.Slot> other = slots
-                        .findSlot(session.getSpecialty(), pref, today)
-                        .map(this::toSlot);
+                Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
                 if (other.isPresent()) {
                     session.clearPending();
                     return toConfirm(session, "Понял. ", other.get());
                 }
             }
-            String reply = "Подтвердите, пожалуйста: " + session.getPendingSummary()
-                    + ". Ответьте «да» или «нет».";
+            String reply = "Подтвердите, пожалуйста: " + session.getPendingSummary() + ". Ответьте «да» или «нет».";
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(), 0);
         }
@@ -513,45 +378,58 @@ public class BookingFlow {
     }
 
     // ------------------------------------------------------------------
-    // Шаг: создание записи
+    // Создание записи через МИС
     // ------------------------------------------------------------------
-
     private Turn doBook(DialogueSession session) {
         String login = session.getPatientLogin();
         if (login == null || login.isBlank()) {
-            return transfer(session, "Не получается определить пациента. "
-                    + "Соединяю с регистратором.", "R-07");
+            return transfer(session, "Не получается определить пациента. Соединяю с регистратором.", "R-07");
         }
+
+        PatientIdentity who = identity.findByLogin(login).orElse(null);
+        if (who == null || who.last() == null || who.birthDate() == null) {
+            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        }
+
         try {
-            Map<String, Object> a = appointments.book(login, session.getPendingDoctorId(),
-                    LocalDate.parse(session.getPendingDate()), session.getPendingTime());
+            // ИСПРАВЛЕНО: misPatient вместо misClient
+            MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
+
+            LocalDate d = LocalDate.parse(session.getPendingDate());
+            String dateStr = d.format(DATE_FMT);
+            String scheduledAt = dateStr + " " + session.getPendingTime();
+
+            // ИСПРАВЛЕНО: misPatient.id()
+            MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
+
+            appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
+
             Integer cabinet = session.getPendingCabinet();
-            String reply = "Готово, вы записаны. " + spokenDate(a.get("date"), a.get("time"))
-                    + ", " + a.get("doctorName")
+            String reply = "Готово, вы записаны. " + spokenDate(visit.scheduledAt(), "")
+                    + ", " + visit.doctor().fullName()
                     + (cabinet == null ? "" : ", кабинет " + RussianTime.number(cabinet))
                     + ". SMS придёт на этот номер.";
+
             session.clearPending();
             session.setStage("CONFIRMED");
             session.append("ассистент", reply);
             return Turn.hangup(reply, "CONFIRMED", "BOOKED", 0);
-        } catch (RuntimeException e) {
-            log.warn("Запись не создана: {}", e.getMessage());
+
+        } catch (MisConflictException | MisBadRequestException e) {
+            log.warn("МИС отклонила запись: {}", e.getMessage());
             session.clearPending();
             session.setStage("OFFER");
             String reply = "Извините, это время только что заняли. Назовите другое время.";
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
+
+        } catch (MisUnavailableException e) {
+            log.error("МИС недоступна при создании записи: {}", e.getMessage());
+            session.clearPending();
+            return transfer(session, "Система записи временно недоступна. Соединяю с регистратором.", "R-06");
         }
     }
 
-    // ------------------------------------------------------------------
-    // Дубликат -> предложение переноса (переход в С-03)
-    // ------------------------------------------------------------------
-
-    /**
-     * У пациента уже есть активная запись на эту специальность.
-     * Регламент С-01 требует предложить перенос (сценарий С-03), а не записать вторую.
-     */
     private Turn offerMove(DialogueSession session, String greeting, Map<String, Object> existing) {
         session.setPendingAppointmentId(((Number) existing.get("id")).longValue());
         session.setStage("DUP");
@@ -564,12 +442,8 @@ public class BookingFlow {
 
     private Turn onDuplicate(DialogueSession session, String text) {
         PolicyRules.Answer answer = PolicyRules.answer(text);
-        if (answer == PolicyRules.Answer.YES) {
-            return offerReschedule(session);
-        }
+        if (answer == PolicyRules.Answer.YES) return offerReschedule(session);
         if (answer == PolicyRules.Answer.UNKNOWN && mentionsWhen(text)) {
-            // Пациент ответил не «да», а сразу назвал время: «вторник», «завтра»,
-            // «на 20 октября». Понимаем это как «перенесите на это время».
             rememberTime(session, parser.parse(text), text);
             return offerReschedule(session);
         }
@@ -585,50 +459,37 @@ public class BookingFlow {
         return Turn.continueWith(reply, "DUP", List.of(), 0);
     }
 
-    /** Названо ли в реплике время или дата. */
     private boolean mentionsWhen(String text) {
-        if (text == null || text.isBlank()) {
-            return false;
-        }
+        if (text == null || text.isBlank()) return false;
         String q = ClinicalKnowledgeBase.normalize(text);
-        if (q.contains("завтра") || q.contains("послезавтра") || q.contains("сегодня")) {
-            return true;
-        }
+        if (q.contains("завтра") || q.contains("послезавтра") || q.contains("сегодня")) return true;
         return RussianTime.parseDayMonth(q, LocalDate.now()) != null
                 || RussianTime.parseNumericDate(q, LocalDate.now()) != null
                 || RussianTime.partOfDay(q) != null
                 || byWeekday(q, LocalDate.now()) != null;
     }
 
-    /** С-03: предложить новые слоты для переноса существующей записи. */
     private Turn offerReschedule(DialogueSession session) {
         String specialty = session.getSpecialty();
         LocalDate today = LocalDate.now();
         TimeResolver.TimePreference pref = from(session);
 
-        // Если пациент сразу назвал конкретное время («на 20 октября»), переспрашивать
-        // «когда вам удобно» незачем — слот уже известен, идём к подтверждению.
         boolean named = session.getWantedDate() != null || session.getWantedTime() != null;
         if (named && !pref.isEmpty()) {
             Optional<Turn.Slot> exact = slots.findSlot(specialty, pref, today).map(this::toSlot);
-            if (exact.isPresent()) {
-                return toRescheduleConfirm(session, exact.get());
-            }
+            if (exact.isPresent()) return toRescheduleConfirm(session, exact.get());
         }
 
         List<SlotResolver.Slot> found = slots.offerSlots(specialty, pref, today, RESCHEDULE_OPTIONS);
         if (found.isEmpty()) {
-            String reply = "Свободного времени для переноса сейчас нет. "
-                    + "Могу оставить запись как есть.";
+            String reply = "Свободного времени для переноса сейчас нет. Могу оставить запись как есть.";
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);
         }
         List<Turn.Slot> options = found.stream().map(this::toSlot).toList();
         StringBuilder sb = new StringBuilder("Перенести на: ");
         for (int i = 0; i < options.size(); i++) {
-            if (i > 0) {
-                sb.append("; ");
-            }
+            if (i > 0) sb.append("; ");
             sb.append(options.get(i).spokenCompact(today));
         }
         sb.append(". Когда вам удобно?");
@@ -640,7 +501,6 @@ public class BookingFlow {
         return Turn.continueWith(reply, "RESCHEDULE", options, 0);
     }
 
-    /** Подтверждение переноса: действие RESCHEDULE и та же фраза подтверждения. */
     private Turn toRescheduleConfirm(DialogueSession session, Turn.Slot picked) {
         session.setPendingAction("RESCHEDULE");
         session.setPendingDoctorId(picked.doctorId());
@@ -659,48 +519,73 @@ public class BookingFlow {
         if (session.getOfferedSlots() != null && !session.getOfferedSlots().isBlank()) {
             List<Turn.Slot> offered = decode(session.getOfferedSlots());
             Turn.Slot picked = pickSlot(offered, text);
-            if (picked != null) {
-                return toRescheduleConfirm(session, picked);
-            }
+            if (picked != null) return toRescheduleConfirm(session, picked);
         }
-        // не выбрал из списка — пробуем разобрать названное время
         if (session.getSpecialty() != null) {
             LocalDate today = LocalDate.now();
             TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
-            Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today)
-                    .map(this::toSlot);
-            if (other.isPresent()) {
-                return toRescheduleConfirm(session, other.get());
-            }
+            Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
+            if (other.isPresent()) return toRescheduleConfirm(session, other.get());
         }
         String reply = "Назовите дату и время для переноса.";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);
     }
 
-    /**
-     * С-03, тело: сначала создать новую запись, и только потом отменить старую.
-     * Порядок обязателен — при ошибке старая запись должна остаться в силе.
-     */
+    // ------------------------------------------------------------------
+    // Перенос записи через МИС
+    // ------------------------------------------------------------------
     private Turn doReschedule(DialogueSession session) {
         String login = session.getPatientLogin();
         Long oldId = session.getPendingAppointmentId();
         if (login == null || login.isBlank() || oldId == null) {
             return transfer(session, "Соединяю с регистратором — он перенесёт запись.", "R-07");
         }
+
+        PatientIdentity who = identity.findByLogin(login).orElse(null);
+        if (who == null || who.last() == null || who.birthDate() == null) {
+            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        }
+
         try {
-            Map<String, Object> created = appointments.book(login, session.getPendingDoctorId(),
-                    LocalDate.parse(session.getPendingDate()), session.getPendingTime());
+            // ИСПРАВЛЕНО: misPatient вместо misClient
+            MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
+
+            LocalDate d = LocalDate.parse(session.getPendingDate());
+            String dateStr = d.format(DATE_FMT);
+            String scheduledAt = dateStr + " " + session.getPendingTime();
+
+            // ИСПРАВЛЕНО: misPatient.id()
+            MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
+
+            try {
+                misClient.cancelVisit(oldId);
+            } catch (Exception e) {
+                log.warn("Не удалось отменить старую запись {} в МИС: {}", oldId, e.getMessage());
+            }
+
+            appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
             appointments.cancel(login, oldId, false);
+
             String reply = "Готово, запись перенесена на "
-                    + spokenDate(created.get("date"), created.get("time"))
+                    + spokenDate(visit.scheduledAt(), "")
                     + ". Прежняя запись отменена.";
+
             session.clearPending();
             session.setStage("CONFIRMED");
             session.append("ассистент", reply);
             return Turn.hangup(reply, "CONFIRMED", "RESCHEDULED", 0);
-        } catch (RuntimeException e) {
-            log.warn("Перенос не выполнен: {}", e.getMessage());
+
+        } catch (MisConflictException | MisBadRequestException e) {
+            log.warn("МИС отклонила перенос: {}", e.getMessage());
+            String reply = "Извините, это время только что заняли. Назовите другое время.";
+            session.clearPending();
+            session.setStage("OFFER");
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "OFFER", List.of(), 0);
+
+        } catch (MisUnavailableException e) {
+            log.error("МИС недоступна при переносе: {}", e.getMessage());
             String reply = "Извините, не получилось перенести. Ваша прежняя запись "
                     + "остаётся в силе. Соединяю с регистратором.";
             session.clearPending();
@@ -712,7 +597,7 @@ public class BookingFlow {
     }
 
     // ------------------------------------------------------------------
-    // Шаг: идентификация
+    // Идентификация
     // ------------------------------------------------------------------
 
     private Turn onIdentity(DialogueSession session, PatientIdentity who, String text) {
@@ -720,7 +605,6 @@ public class BookingFlow {
         String login = session.getPatientLogin() == null || session.getPatientLogin().isBlank()
                 ? (who.login()) : session.getPatientLogin();
 
-        // пришли с HTTP — пациент уже аутентифицирован, ищем только ФИО/ДР
         if (login != null && !login.isBlank() && !data.hasFio() && !data.hasBirthDate()) {
             PatientIdentity found = identity.findByFioAndBirthDate(who.fio(), who.birthDate())
                     .orElse(who);
@@ -728,21 +612,13 @@ public class BookingFlow {
             return continueScenario(session, found);
         }
 
-        // Что названо, складываем из нескольких ходов. Раньше разбиралась только
-        // текущая реплика, и пациент ходил по кругу: назвал ФИО, назвал дату
-        // рождения — и его снова просили назвать ФИО.
         String fio = data.hasFio() ? data.fio() : session.getSaidFio();
         LocalDate birth = data.hasBirthDate() ? data.birthDate() : rememberedBirth(session);
-        if (fio != null) {
-            session.setSaidFio(fio);
-        }
-        if (birth != null) {
-            session.setSaidBirthDate(birth.toString());
-        }
+        if (fio != null) session.setSaidFio(fio);
+        if (birth != null) session.setSaidBirthDate(birth.toString());
 
         if (fio == null && birth == null) {
-            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество "
-                    + "и дату рождения.");
+            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.");
         }
         if (fio == null) {
             return askIdentity(session, "Назовите, пожалуйста, фамилию, имя и отчество.");
@@ -759,12 +635,9 @@ public class BookingFlow {
         return continueScenario(session, found.get());
     }
 
-    /** Дата рождения из предыдущих ходов этого же звонка. */
     private static LocalDate rememberedBirth(DialogueSession session) {
         String v = session.getSaidBirthDate();
-        if (v == null || v.isBlank()) {
-            return null;
-        }
+        if (v == null || v.isBlank()) return null;
         try {
             return LocalDate.parse(v);
         } catch (RuntimeException e) {
@@ -772,59 +645,36 @@ public class BookingFlow {
         }
     }
 
-    /** Простое уточнение недостающего — попыткой идентификации не считается. */
     private Turn askIdentity(DialogueSession session, String reply) {
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
     }
 
-    /**
-     * Р-07: пациента нет в базе.
-     *
-     * <p>Фамилия и дата рождения переспрашиваются РОВНО ОДИН РАЗ, на второй
-     * неудаче — перевод оператору. Раньше повтор был бесконечным: счётчик
-     * неудач обнулялся на каждом ходу, поэтому лестница Р-05 не срабатывала
-     * и ассистент мог до конца звонка повторять «Не получается найти вас в базе».
-     *
-     * <p>Шаг «попросить номер полиса ОМС» из регламента 3.5 здесь пропущен
-     * сознательно: для стенда перевод оператору понятнее. Разбор номера
-     * полиса в коде уже есть ({@code PatientNameParser.policy()}), подключить
-     * его — одна правка.
-     */
     private Turn onIdentityNotFound(DialogueSession session) {
         int misses = session.getIdentityMisses() + 1;
         session.setIdentityMisses(misses);
         if (misses >= 2) {
-            String reply = "Проверьте, пожалуйста, данные в регистратуре. "
-                    + "Соединяю с сотрудником.";
+            String reply = "Проверьте, пожалуйста, данные в регистратуре. Соединяю с сотрудником.";
             return transfer(session, reply, "Р-07");
         }
-        String reply = "Не получается найти вас в базе. Проверьте, пожалуйста, "
-                + "фамилию и дату рождения.";
+        String reply = "Не получается найти вас в базе. Проверьте, пожалуйста, фамилию и дату рождения.";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "IDENTITY", List.of(), misses);
     }
 
-    /** Идентификация прошла — продолжаем сценарий с того места, где остановились. */
     private Turn continueScenario(DialogueSession session, PatientIdentity p) {
         LocalDate today = LocalDate.now();
         TimeResolver.TimePreference pref = from(session);
         String greeting = p.addressName().isBlank() ? "" : "Спасибо, " + p.addressName() + ". ";
 
-        // Повторная запись на ту же специальность — тоже повод предложить перенос,
-        // иначе пациент получит вторую запись к тому же врачу мимо сценария С-03.
         Optional<Map<String, Object>> dupAgain = activeBooking(p, session.getSpecialty());
         if (dupAgain.isPresent()) {
             return offerMove(session, greeting, dupAgain.get());
         }
 
-        // К конкретному слоту идём, только если пациент САМ назвал дату или время.
-        // Если пожелания не было, предложить выбор — правильнее, чем записать «на первый
-        // свободный» без спроса: дата записи обязана быть подтверждена пациентом.
         boolean hasWish = session.getWantedDate() != null || session.getWantedTime() != null;
         if (hasWish && !pref.isEmpty()) {
-            Optional<Turn.Slot> chosen = slots.findSlot(session.getSpecialty(), pref, today)
-                    .map(this::toSlot);
+            Optional<Turn.Slot> chosen = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
             if (chosen.isPresent()) {
                 return toConfirm(session, greeting, chosen.get());
             }
@@ -832,15 +682,8 @@ public class BookingFlow {
         return offerSlots(session, greeting);
     }
 
-    // ------------------------------------------------------------------
-    // Общее
-    // ------------------------------------------------------------------
-
-    /** Активная запись пациента по этой специальности. */
     Optional<Map<String, Object>> activeBooking(PatientIdentity who, String specialty) {
-        if (who == null || !who.identified()) {
-            return Optional.empty();
-        }
+        if (who == null || !who.identified()) return Optional.empty();
         for (Map<String, Object> a : appointments.listFor(who.login(), false)) {
             if ("CONFIRMED".equals(a.get("status"))
                     && (specialty == null || specialty.equals(a.get("specialty")))) {
@@ -850,11 +693,8 @@ public class BookingFlow {
         return Optional.empty();
     }
 
-    /** Последняя подтверждённая запись пациента — для ответа «вы записаны». */
     Map<String, Object> lastBooking(String login) {
-        if (login == null || login.isBlank()) {
-            return null;
-        }
+        if (login == null || login.isBlank()) return null;
         List<Map<String, Object>> all = appointments.listFor(login, false);
         return all.isEmpty() ? null : all.get(all.size() - 1);
     }
@@ -870,26 +710,17 @@ public class BookingFlow {
         return new Turn.Slot(s.doctorId(), s.fio(), s.specialty(), s.date(), s.time(), s.cabinet());
     }
 
-    /** Дата и время словами — так требует регламент (§3.2). */
     static String spokenDate(Object date, Object time) {
-        if (date == null) {
-            return "";
-        }
+        if (date == null) return "";
         LocalDate d = LocalDate.parse(String.valueOf(date));
         String t = time == null ? null : String.valueOf(time);
-        return t == null || t.isBlank()
-                ? RussianTime.sayDate(d)
-                : RussianTime.sayDateTime(d, t);
+        return t == null || t.isBlank() ? RussianTime.sayDate(d) : RussianTime.sayDateTime(d, t);
     }
-
-    // --- предложенные слоты хранятся в сессии строкой ---
 
     static String encode(List<Turn.Slot> slots) {
         StringBuilder sb = new StringBuilder();
         for (Turn.Slot s : slots) {
-            if (sb.length() > 0) {
-                sb.append(';');
-            }
+            if (sb.length() > 0) sb.append(';');
             sb.append(s.doctorId()).append('|').append(s.date()).append('|')
                     .append(s.time()).append('|').append(s.cabinet() == null ? "" : s.cabinet())
                     .append('|').append(s.fio()).append('|').append(s.specialty() == null ? "" : s.specialty());
@@ -899,14 +730,10 @@ public class BookingFlow {
 
     static List<Turn.Slot> decode(String packed) {
         List<Turn.Slot> result = new ArrayList<>();
-        if (packed == null || packed.isBlank()) {
-            return result;
-        }
+        if (packed == null || packed.isBlank()) return result;
         for (String part : packed.split(";")) {
             String[] f = part.split("\\|", -1);
-            if (f.length < 5) {
-                continue;
-            }
+            if (f.length < 5) continue;
             result.add(new Turn.Slot(Long.valueOf(f[0]), f[4], f.length > 5 ? f[5] : null,
                     LocalDate.parse(f[1]), f[2],
                     f[3].isBlank() ? null : Integer.valueOf(f[3])));
@@ -914,7 +741,6 @@ public class BookingFlow {
         return result;
     }
 
-    /** Восстанавливает пожелание пациента, сохранённое в сессии. */
     static TimeResolver.TimePreference from(DialogueSession session) {
         LocalDate date = session.getWantedDate() == null || session.getWantedDate().isBlank()
                 ? null : LocalDate.parse(session.getWantedDate());
