@@ -4,6 +4,7 @@ import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.doctor.DoctorRepository;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
+import com.clinic.backend.mis.EscalationService;
 import com.clinic.backend.mis.MisClient;
 import com.clinic.backend.mis.dto.MisClientDto;
 import com.clinic.backend.mis.dto.MisVisit;
@@ -58,10 +59,17 @@ class IdentityRetryTest {
 
         when(identity.findByLogin(anyString())).thenReturn(Optional.of(ANY)); // <--- ДОБАВЛЕНО
 
+
+        DialogueSessionRepository sessions = mock(DialogueSessionRepository.class);
+        ScheduleQueryService scheduleQueries = new ScheduleQueryService(
+                mock(DoctorRepository.class), mock(ScheduleProvider.class));
+
+        // Добавляем мок для EscalationService
+        EscalationService escalationService = mock(EscalationService.class);
+
+
         flow = new BookingFlow(parser, slots, appointments, identity,
-                mock(DialogueSessionRepository.class), new ScheduleQueryService(
-                mock(DoctorRepository.class), mock(ScheduleProvider.class)),
-                misClient); // <--- ДОБАВЛЕНО
+                sessions, scheduleQueries, misClient, escalationService);
         session = new DialogueSession("");
     }
 

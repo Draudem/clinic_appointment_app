@@ -1,6 +1,7 @@
 package com.clinic.backend.mis;
 
 import com.clinic.backend.mis.dto.MisClientDto;
+import com.clinic.backend.mis.dto.MisEscalation;
 import com.clinic.backend.mis.dto.MisVisit;
 
 import java.time.LocalDate;
@@ -24,4 +25,6 @@ public interface MisClient {
 
     /** Отменяет запись (PATCH status="Отменена"). */
     MisVisit cancelVisit(Long visitId);
+
+    MisEscalation createEscalation(Long clientId, String description);
 }

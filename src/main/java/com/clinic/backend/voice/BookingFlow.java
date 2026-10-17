@@ -4,6 +4,7 @@ import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
 import com.clinic.backend.identity.PatientNameParser;
+import com.clinic.backend.mis.EscalationService;
 import com.clinic.backend.mis.MisBadRequestException;
 import com.clinic.backend.mis.MisClient;
 import com.clinic.backend.mis.MisConflictException;
@@ -42,10 +43,13 @@ public class BookingFlow {
     private final DialogueSessionRepository sessions;
     private final ScheduleQueryService scheduleQueries;
     private final MisClient misClient;
+    private final EscalationService escalationService; // <-- ДОБАВЛЕНО ПОЛЕ
 
+    // <-- ИСПРАВЛЕННЫЙ КОНСТРУКТОР
     public BookingFlow(CommandParser parser, SlotResolver slots, AppointmentService appointments,
                        PatientIdentityResolver identity, DialogueSessionRepository sessions,
-                       ScheduleQueryService scheduleQueries, MisClient misClient) {
+                       ScheduleQueryService scheduleQueries, MisClient misClient,
+                       EscalationService escalationService) {
         this.parser = parser;
         this.slots = slots;
         this.appointments = appointments;
@@ -53,6 +57,7 @@ public class BookingFlow {
         this.sessions = sessions;
         this.scheduleQueries = scheduleQueries;
         this.misClient = misClient;
+        this.escalationService = escalationService;
     }
 
     @Transactional
@@ -106,14 +111,11 @@ public class BookingFlow {
     private Turn onScheduleInfo(DialogueSession session, PatientIdentity who,
                                 ScheduleInfoRule.ScheduleInfo info) {
         Optional<ScheduleQueryService.Reply> answer = scheduleQueries.answer(info);
-        if (answer.isEmpty()) {
-            return onIntent(session, who, info.text());
-        }
+        if (answer.isEmpty()) return onIntent(session, who, info.text());
         ScheduleQueryService.Reply reply = answer.get();
 
-        if (reply.transfer()) {
-            return transfer(session, reply.text(), reply.rule());
-        }
+        if (reply.transfer()) return transfer(session, reply.text(), reply.rule());
+
         if (reply.specialty() != null && !reply.specialty().isBlank()) {
             session.setSpecialty(reply.specialty());
         }
@@ -127,9 +129,7 @@ public class BookingFlow {
         session.setStage("SPECIALTY");
         if (answer == PolicyRules.Answer.YES) {
             String specialty = session.getSpecialty();
-            if (specialty == null || specialty.isBlank()) {
-                return onIntent(session, who, text);
-            }
+            if (specialty == null || specialty.isBlank()) return onIntent(session, who, text);
             return afterSpecialty(session, who, null);
         }
         if (answer == PolicyRules.Answer.NO) {
@@ -143,17 +143,14 @@ public class BookingFlow {
 
     private Turn onIntent(DialogueSession session, PatientIdentity who, String text) {
         Optional<ScheduleInfoRule.ScheduleInfo> schedule = ScheduleInfoRule.detect(text);
-        if (schedule.isPresent()) {
-            return onScheduleInfo(session, who, schedule.get());
-        }
+        if (schedule.isPresent()) return onScheduleInfo(session, who, schedule.get());
 
         ParsedCommand parsed = parser.parse(text);
         session.setPendingFrame(parsed.frame());
 
         String specialty = parsed.hasSpecialty() ? parsed.specialty() : session.getSpecialty();
         if (specialty == null || specialty.isBlank()) {
-            String reply = "К какому врачу хотите записаться? Назовите специальность "
-                    + "или скажите, что беспокоит.";
+            String reply = "К какому врачу хотите записаться? Назовите специальность или скажите, что беспокоит.";
             session.setStage("SPECIALTY");
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "SPECIALTY", List.of(), 0);
@@ -171,7 +168,6 @@ public class BookingFlow {
 
         rememberTime(session, parsed, text);
         Optional<Turn.Slot> exact = findExact(session, specialty, parsed, text);
-
         return afterSpecialty(session, who, exact.orElse(null));
     }
 
@@ -186,9 +182,7 @@ public class BookingFlow {
                                           ParsedCommand parsed, String text) {
         LocalDate today = LocalDate.now();
         TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
-        if (pref.isEmpty()) {
-            return Optional.empty();
-        }
+        if (pref.isEmpty()) return Optional.empty();
         return slots.findSlot(specialty, pref, today).map(this::toSlot);
     }
 
@@ -205,13 +199,9 @@ public class BookingFlow {
         String greeting = who.addressName().isBlank() ? "" : "Спасибо, " + who.addressName() + ". ";
 
         Optional<Map<String, Object>> dup = activeBooking(who, session.getSpecialty());
-        if (dup.isPresent()) {
-            return offerMove(session, greeting, dup.get());
-        }
+        if (dup.isPresent()) return offerMove(session, greeting, dup.get());
 
-        if (chosen != null) {
-            return toConfirm(session, greeting + "Записываю: ", chosen);
-        }
+        if (chosen != null) return toConfirm(session, greeting + "Записываю: ", chosen);
 
         return offerSlots(session, greeting);
     }
@@ -221,8 +211,7 @@ public class BookingFlow {
         TimeResolver.TimePreference pref = from(session);
         List<SlotResolver.Slot> found = slots.offerSlots(session.getSpecialty(), pref, today, BOOKING_OPTIONS);
         if (found.isEmpty()) {
-            String reply = greeting + "Свободного времени в ближайшие две недели нет. "
-                    + "Могу поставить вас в лист ожидания и перезвонить.";
+            String reply = greeting + "Свободного времени в ближайшие две недели нет. Могу поставить вас в лист ожидания и перезвонить.";
             session.setStage("OFFER");
             session.setOfferedSlots("");
             session.append("ассистент", reply);
@@ -233,13 +222,10 @@ public class BookingFlow {
 
     private Turn onOfferChoice(DialogueSession session, String text) {
         List<Turn.Slot> offered = decode(session.getOfferedSlots());
-        if (offered.isEmpty()) {
-            return offerSlots(session, "");
-        }
+        if (offered.isEmpty()) return offerSlots(session, "");
         Turn.Slot picked = pickSlot(offered, text);
         if (picked == null) {
-            String reply = "Скажите, пожалуйста, когда вам удобно: можно назвать дату "
-                    + "или выбрать один из предложенных вариантов.";
+            String reply = "Скажите, пожалуйста, когда вам удобно: можно назвать дату или выбрать один из предложенных вариантов.";
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", offered, 0);
         }
@@ -278,9 +264,7 @@ public class BookingFlow {
             Integer idx = PolicyRules.ordinalChoice(text);
             if (idx != null && idx >= 0 && idx < offered.size()) return offered.get(idx);
         }
-        if (offered.size() == 1 && PolicyRules.answer(text) == PolicyRules.Answer.YES) {
-            return offered.get(0);
-        }
+        if (offered.size() == 1 && PolicyRules.answer(text) == PolicyRules.Answer.YES) return offered.get(0);
         return null;
     }
 
@@ -315,9 +299,7 @@ public class BookingFlow {
         session.setPendingDoctorId(picked.doctorId());
         session.setPendingDate(picked.date().toString());
         preparePending(session, picked);
-        String reply = prefix.isEmpty()
-                ? picked.spoken() + ". Записать вас?"
-                : prefix + picked.spoken() + ". Верно?";
+        String reply = prefix.isEmpty() ? picked.spoken() + ". Записать вас?" : prefix + picked.spoken() + ". Верно?";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "PENDING_CONFIRMATION", List.of(picked), 0);
     }
@@ -371,35 +353,24 @@ public class BookingFlow {
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
         }
 
-        if ("RESCHEDULE".equals(session.getPendingAction())) {
-            return doReschedule(session);
-        }
+        if ("RESCHEDULE".equals(session.getPendingAction())) return doReschedule(session);
         return doBook(session);
     }
 
-    // ------------------------------------------------------------------
-    // Создание записи через МИС
-    // ------------------------------------------------------------------
     private Turn doBook(DialogueSession session) {
         String login = session.getPatientLogin();
-        if (login == null || login.isBlank()) {
-            return transfer(session, "Не получается определить пациента. Соединяю с регистратором.", "R-07");
-        }
+        if (login == null || login.isBlank()) return transfer(session, "Не получается определить пациента. Соединяю с регистратором.", "R-07");
 
         PatientIdentity who = identity.findByLogin(login).orElse(null);
-        if (who == null || who.last() == null || who.birthDate() == null) {
-            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
-        }
+        if (who == null || who.last() == null || who.birthDate() == null) return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
 
         try {
-            // ИСПРАВЛЕНО: misPatient вместо misClient
             MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
 
             LocalDate d = LocalDate.parse(session.getPendingDate());
             String dateStr = d.format(DATE_FMT);
             String scheduledAt = dateStr + " " + session.getPendingTime();
 
-            // ИСПРАВЛЕНО: misPatient.id()
             MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
 
             appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
@@ -433,9 +404,7 @@ public class BookingFlow {
     private Turn offerMove(DialogueSession session, String greeting, Map<String, Object> existing) {
         session.setPendingAppointmentId(((Number) existing.get("id")).longValue());
         session.setStage("DUP");
-        String reply = greeting + "У вас уже есть запись: " + existing.get("doctorName")
-                + ", " + spokenDate(existing.get("date"), existing.get("time"))
-                + ". Хотите перенести её?";
+        String reply = greeting + "У вас уже есть запись: " + existing.get("doctorName") + ", " + spokenDate(existing.get("date"), existing.get("time")) + ". Хотите перенести её?";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "DUP", List.of(), 0);
     }
@@ -532,45 +501,29 @@ public class BookingFlow {
         return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);
     }
 
-    // ------------------------------------------------------------------
-    // Перенос записи через МИС
-    // ------------------------------------------------------------------
     private Turn doReschedule(DialogueSession session) {
         String login = session.getPatientLogin();
         Long oldId = session.getPendingAppointmentId();
-        if (login == null || login.isBlank() || oldId == null) {
-            return transfer(session, "Соединяю с регистратором — он перенесёт запись.", "R-07");
-        }
+        if (login == null || login.isBlank() || oldId == null) return transfer(session, "Соединяю с регистратором — он перенесёт запись.", "R-07");
 
         PatientIdentity who = identity.findByLogin(login).orElse(null);
-        if (who == null || who.last() == null || who.birthDate() == null) {
-            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
-        }
+        if (who == null || who.last() == null || who.birthDate() == null) return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
 
         try {
-            // ИСПРАВЛЕНО: misPatient вместо misClient
             MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
 
             LocalDate d = LocalDate.parse(session.getPendingDate());
             String dateStr = d.format(DATE_FMT);
             String scheduledAt = dateStr + " " + session.getPendingTime();
 
-            // ИСПРАВЛЕНО: misPatient.id()
             MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
 
-            try {
-                misClient.cancelVisit(oldId);
-            } catch (Exception e) {
-                log.warn("Не удалось отменить старую запись {} в МИС: {}", oldId, e.getMessage());
-            }
+            try { misClient.cancelVisit(oldId); } catch (Exception e) { log.warn("Не удалось отменить старую запись {} в МИС: {}", oldId, e.getMessage()); }
 
             appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
             appointments.cancel(login, oldId, false);
 
-            String reply = "Готово, запись перенесена на "
-                    + spokenDate(visit.scheduledAt(), "")
-                    + ". Прежняя запись отменена.";
-
+            String reply = "Готово, запись перенесена на " + spokenDate(visit.scheduledAt(), "") + ". Прежняя запись отменена.";
             session.clearPending();
             session.setStage("CONFIRMED");
             session.append("ассистент", reply);
@@ -586,8 +539,7 @@ public class BookingFlow {
 
         } catch (MisUnavailableException e) {
             log.error("МИС недоступна при переносе: {}", e.getMessage());
-            String reply = "Извините, не получилось перенести. Ваша прежняя запись "
-                    + "остаётся в силе. Соединяю с регистратором.";
+            String reply = "Извините, не получилось перенести. Ваша прежняя запись остаётся в силе. Соединяю с регистратором.";
             session.clearPending();
             session.setHandedOff(true);
             session.setStage("OPERATOR");
@@ -596,18 +548,12 @@ public class BookingFlow {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Идентификация
-    // ------------------------------------------------------------------
-
     private Turn onIdentity(DialogueSession session, PatientIdentity who, String text) {
         PatientNameParser.Data data = PatientNameParser.parse(text);
-        String login = session.getPatientLogin() == null || session.getPatientLogin().isBlank()
-                ? (who.login()) : session.getPatientLogin();
+        String login = session.getPatientLogin() == null || session.getPatientLogin().isBlank() ? (who.login()) : session.getPatientLogin();
 
         if (login != null && !login.isBlank() && !data.hasFio() && !data.hasBirthDate()) {
-            PatientIdentity found = identity.findByFioAndBirthDate(who.fio(), who.birthDate())
-                    .orElse(who);
+            PatientIdentity found = identity.findByFioAndBirthDate(who.fio(), who.birthDate()).orElse(who);
             session.setPatientLogin(found.login());
             return continueScenario(session, found);
         }
@@ -617,20 +563,13 @@ public class BookingFlow {
         if (fio != null) session.setSaidFio(fio);
         if (birth != null) session.setSaidBirthDate(birth.toString());
 
-        if (fio == null && birth == null) {
-            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.");
-        }
-        if (fio == null) {
-            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя и отчество.");
-        }
-        if (birth == null) {
-            return askIdentity(session, "Назовите, пожалуйста, дату рождения.");
-        }
+        if (fio == null && birth == null) return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.");
+        if (fio == null) return askIdentity(session, "Назовите, пожалуйста, фамилию, имя и отчество.");
+        if (birth == null) return askIdentity(session, "Назовите, пожалуйста, дату рождения.");
 
         Optional<PatientIdentity> found = identity.findByFioAndBirthDate(fio, birth);
-        if (found.isEmpty()) {
-            return onIdentityNotFound(session);
-        }
+        if (found.isEmpty()) return onIdentityNotFound(session);
+
         session.setPatientLogin(found.get().login());
         return continueScenario(session, found.get());
     }
@@ -638,11 +577,7 @@ public class BookingFlow {
     private static LocalDate rememberedBirth(DialogueSession session) {
         String v = session.getSaidBirthDate();
         if (v == null || v.isBlank()) return null;
-        try {
-            return LocalDate.parse(v);
-        } catch (RuntimeException e) {
-            return null;
-        }
+        try { return LocalDate.parse(v); } catch (RuntimeException e) { return null; }
     }
 
     private Turn askIdentity(DialogueSession session, String reply) {
@@ -668,16 +603,12 @@ public class BookingFlow {
         String greeting = p.addressName().isBlank() ? "" : "Спасибо, " + p.addressName() + ". ";
 
         Optional<Map<String, Object>> dupAgain = activeBooking(p, session.getSpecialty());
-        if (dupAgain.isPresent()) {
-            return offerMove(session, greeting, dupAgain.get());
-        }
+        if (dupAgain.isPresent()) return offerMove(session, greeting, dupAgain.get());
 
         boolean hasWish = session.getWantedDate() != null || session.getWantedTime() != null;
         if (hasWish && !pref.isEmpty()) {
             Optional<Turn.Slot> chosen = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
-            if (chosen.isPresent()) {
-                return toConfirm(session, greeting, chosen.get());
-            }
+            if (chosen.isPresent()) return toConfirm(session, greeting, chosen.get());
         }
         return offerSlots(session, greeting);
     }
@@ -685,8 +616,7 @@ public class BookingFlow {
     Optional<Map<String, Object>> activeBooking(PatientIdentity who, String specialty) {
         if (who == null || !who.identified()) return Optional.empty();
         for (Map<String, Object> a : appointments.listFor(who.login(), false)) {
-            if ("CONFIRMED".equals(a.get("status"))
-                    && (specialty == null || specialty.equals(a.get("specialty")))) {
+            if ("CONFIRMED".equals(a.get("status")) && (specialty == null || specialty.equals(a.get("specialty")))) {
                 return Optional.of(a);
             }
         }
@@ -703,6 +633,15 @@ public class BookingFlow {
         session.setHandedOff(true);
         session.setStage("OPERATOR");
         session.append("ассистент", reply);
+
+        if (session.getPatientLogin() != null && !session.getPatientLogin().isBlank()) {
+            identity.findByLogin(session.getPatientLogin()).ifPresent(who -> {
+                if (who.last() != null && who.birthDate() != null) {
+                    escalationService.escalate(who.last(), who.first(), who.birthDate(), reply, rule);
+                }
+            });
+        }
+
         return Turn.transfer(reply, rule, "ESCALATED", session.getMissCount());
     }
 
@@ -742,11 +681,8 @@ public class BookingFlow {
     }
 
     static TimeResolver.TimePreference from(DialogueSession session) {
-        LocalDate date = session.getWantedDate() == null || session.getWantedDate().isBlank()
-                ? null : LocalDate.parse(session.getWantedDate());
-        String time = session.getWantedTime() == null || session.getWantedTime().isBlank()
-                ? null : session.getWantedTime();
-        return new TimeResolver.TimePreference(date, time, null, null, null, false,
-                date == null && time == null ? "" : "по выбору пациента");
+        LocalDate date = session.getWantedDate() == null || session.getWantedDate().isBlank() ? null : LocalDate.parse(session.getWantedDate());
+        String time = session.getWantedTime() == null || session.getWantedTime().isBlank() ? null : session.getWantedTime();
+        return new TimeResolver.TimePreference(date, time, null, null, null, false, date == null && time == null ? "" : "по выбору пациента");
     }
 }

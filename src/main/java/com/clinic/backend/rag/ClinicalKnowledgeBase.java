@@ -107,8 +107,7 @@ public class ClinicalKnowledgeBase {
     static {
         DESIGNATION_STEMS.put("Терапевт", List.of("терапевт"));
         DESIGNATION_STEMS.put("Стоматолог", List.of("стоматолог", "дантист", "зубн"));
-        DESIGNATION_STEMS.put("Офтальмолог", List.of("офтальмолог", "окулист"));
-        DESIGNATION_STEMS.put("ЛОР", List.of("лор", "отоларинголог"));
+        DESIGNATION_STEMS.put("Офтальмолог", List.of("офтальмолог", "окулист", "овтальмолог", "оптальмолог", "апилинолог"));        DESIGNATION_STEMS.put("ЛОР", List.of("лор", "отоларинголог"));
         DESIGNATION_STEMS.put("Невролог", List.of("невролог", "невропатолог"));
         DESIGNATION_STEMS.put("Хирург", List.of("хирург"));
         DESIGNATION_STEMS.put("Дерматолог", List.of("дерматолог", "кожник"));

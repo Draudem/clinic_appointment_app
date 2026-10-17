@@ -2,6 +2,7 @@ package com.clinic.backend.mis;
 
 import com.clinic.backend.mis.dto.MisClientDto;
 import com.clinic.backend.mis.dto.MisError;
+import com.clinic.backend.mis.dto.MisEscalation;
 import com.clinic.backend.mis.dto.MisVisit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -69,6 +70,15 @@ public class RestMisClient implements MisClient {
         String json = "{\"status\":\"Отменена\"}";
         HttpResponse<String> res = send("PATCH", "/visits/" + visitId, json);
         return parse(res.body(), MisVisit.class);
+    }
+
+    @Override
+    public MisEscalation createEscalation(Long clientId, String description) {
+        // Экранируем кавычки в описании, чтобы не сломать JSON
+        String safeDesc = description.replace("\"", "\\\"");
+        String json = String.format("{\"client_id\":%d,\"description\":\"%s\"}", clientId, safeDesc);
+        HttpResponse<String> res = send("POST", "/escalations", json);
+        return parse(res.body(), MisEscalation.class);
     }
 
     // --- Инфраструктура HTTP ---

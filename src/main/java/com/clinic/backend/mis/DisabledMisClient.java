@@ -1,6 +1,7 @@
 package com.clinic.backend.mis;
 
 import com.clinic.backend.mis.dto.MisClientDto;
+import com.clinic.backend.mis.dto.MisEscalation;
 import com.clinic.backend.mis.dto.MisVisit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +34,12 @@ public class DisabledMisClient implements MisClient {
 
     @Override
     public MisVisit cancelVisit(Long visitId) {
+        throw new MisUnavailableException("МИС недоступна: не настроен токен.");
+    }
+
+    // --- ДОБАВЛЕНО: реализация для эскалации ---
+    @Override
+    public MisEscalation createEscalation(Long clientId, String description) {
         throw new MisUnavailableException("МИС недоступна: не настроен токен.");
     }
 }

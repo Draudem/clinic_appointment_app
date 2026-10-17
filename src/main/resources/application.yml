@@ -58,9 +58,9 @@ app:
   # Переключается одним флагом, код не меняется: за интерфейсом
   # ScheduleProvider активна ровно одна реализация.
   schedule:
-    source: ${SCHEDULE_SOURCE:db}
+    source: excel
     excel:
-      path: ${SCHEDULE_EXCEL_PATH:data/schedule.xlsx}
+      path: data/schedule.xlsx
       sheet: ${SCHEDULE_EXCEL_SHEET:}
 
   # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
