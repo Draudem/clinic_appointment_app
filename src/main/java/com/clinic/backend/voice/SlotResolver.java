@@ -2,6 +2,7 @@ package com.clinic.backend.voice;
 
 import com.clinic.backend.appointment.AppointmentRepository;
 import com.clinic.backend.doctor.DoctorRepository;
+import com.clinic.backend.mis.MisClock;
 import com.clinic.backend.schedule.ScheduleEntry;
 import com.clinic.backend.schedule.ScheduleProvider;
 import org.springframework.stereotype.Component;
@@ -36,15 +37,20 @@ public class SlotResolver {
     private final ScheduleProvider schedule;
     private final AppointmentRepository appointments;
 
-    public SlotResolver(ScheduleProvider schedule, AppointmentRepository appointments) {
+    private final MisClock clock;
+
+
+
+    public SlotResolver(ScheduleProvider schedule, AppointmentRepository appointments, MisClock clock) {
         this.schedule = schedule;
         this.appointments = appointments;
+        this.clock = clock;
     }
 
     /** Есть ли вообще врачи по специальности. */
     public boolean specialtyStaffed(String specialty) {
-        return specialty != null && !schedule.bySpecialty(specialty,
-                LocalDate.now(), LocalDate.now()).isEmpty();
+        LocalDate today = clock.today(); // <--- Используем часы МИС
+        return specialty != null && !schedule.bySpecialty(specialty, today, today).isEmpty();
     }
 
     /** Названия специальностей, по которым ведётся запись. */
@@ -146,12 +152,9 @@ public class SlotResolver {
 
     /** Слот сегодняшний, до которого уже нельзя записаться. */
     private boolean inPast(ScheduleEntry e, LocalDate today) {
-        if (!e.date().equals(today)) {
-            return false;
-        }
+        if (!e.date().equals(today)) return false;
         LocalDateTime start = e.date().atTime(java.time.LocalTime.parse(e.time()));
-        return LocalDateTime.now().isAfter(
-                start.minusMinutes(SAME_DAY_MINUTES_BEFORE));
+        return clock.now().isAfter(start.minusMinutes(SAME_DAY_MINUTES_BEFORE)); // <--- Используем часы МИС
     }
 
     private boolean free(ScheduleEntry e) {

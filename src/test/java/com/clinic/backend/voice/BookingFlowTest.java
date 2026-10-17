@@ -1,11 +1,13 @@
 package com.clinic.backend.voice;
 
+import com.clinic.backend.appointment.AppointmentRepository;
 import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.doctor.DoctorRepository;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
 import com.clinic.backend.mis.EscalationService;
 import com.clinic.backend.mis.MisClient;
+import com.clinic.backend.mis.MisClock;
 import com.clinic.backend.mis.dto.MisClientDto;
 import com.clinic.backend.mis.dto.MisVisit;
 import com.clinic.backend.schedule.ScheduleEntry;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -48,10 +51,17 @@ class BookingFlowTest {
     void setUp() {
         appointments = mock(AppointmentService.class);
         identity = mock(PatientIdentityResolver.class);
-        slots = mock(SlotResolver.class);
+        MisClock clock = mock(MisClock.class);
+        when(clock.today()).thenReturn(LocalDate.now()); // В тестах можно оставить текущую дату
+        when(clock.now()).thenReturn(LocalDateTime.now());
+        slots = new SlotResolver(mock(ScheduleProvider.class), mock(AppointmentRepository.class), clock);
         misClient = mock(MisClient.class); // <--- ДОБАВЛЕНО
         CommandParser parser = mock(CommandParser.class);
         EscalationService escalationService = mock(EscalationService.class);
+
+        // В setUp() тестов:
+
+
 
 
         // Настройка мока МИС

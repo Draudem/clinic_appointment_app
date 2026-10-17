@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -172,7 +173,7 @@ public class BookingFlow {
     }
 
     private void rememberTime(DialogueSession session, ParsedCommand parsed, String text) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         session.setWantedDate(pref.date() == null ? null : pref.date().toString());
         session.setWantedTime(pref.exact());
@@ -180,7 +181,7 @@ public class BookingFlow {
 
     private Optional<Turn.Slot> findExact(DialogueSession session, String specialty,
                                           ParsedCommand parsed, String text) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         if (pref.isEmpty()) return Optional.empty();
         return slots.findSlot(specialty, pref, today).map(this::toSlot);
@@ -207,7 +208,7 @@ public class BookingFlow {
     }
 
     private Turn offerSlots(DialogueSession session, String greeting) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         TimeResolver.TimePreference pref = from(session);
         List<SlotResolver.Slot> found = slots.offerSlots(session.getSpecialty(), pref, today, BOOKING_OPTIONS);
         if (found.isEmpty()) {
@@ -235,7 +236,7 @@ public class BookingFlow {
     Turn.Slot pickSlot(List<Turn.Slot> offered, String text) {
         if (offered.isEmpty() || text == null) return null;
         String q = ClinicalKnowledgeBase.normalize(text);
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         LocalDate saidDate = RussianTime.parseDayMonth(q, today);
         if (saidDate == null) saidDate = RussianTime.parseNumericDate(q, today);
         if (saidDate == null && q.contains("завтра")) saidDate = today.plusDays(1);
@@ -332,7 +333,7 @@ public class BookingFlow {
                 return toConfirm(session, "Понял. ", another);
             }
             if ("BOOK".equals(session.getPendingAction()) && session.getSpecialty() != null) {
-                LocalDate today = LocalDate.now();
+                LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
                 TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
                 Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
                 if (other.isPresent()) {
@@ -440,7 +441,7 @@ public class BookingFlow {
 
     private Turn offerReschedule(DialogueSession session) {
         String specialty = session.getSpecialty();
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         TimeResolver.TimePreference pref = from(session);
 
         boolean named = session.getWantedDate() != null || session.getWantedTime() != null;
@@ -491,7 +492,7 @@ public class BookingFlow {
             if (picked != null) return toRescheduleConfirm(session, picked);
         }
         if (session.getSpecialty() != null) {
-            LocalDate today = LocalDate.now();
+            LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
             TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
             Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
             if (other.isPresent()) return toRescheduleConfirm(session, other.get());
@@ -598,7 +599,7 @@ public class BookingFlow {
     }
 
     private Turn continueScenario(DialogueSession session, PatientIdentity p) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
         TimeResolver.TimePreference pref = from(session);
         String greeting = p.addressName().isBlank() ? "" : "Спасибо, " + p.addressName() + ". ";
 
