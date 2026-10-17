@@ -31,6 +31,13 @@ app:
     secret: ${JWT_SECRET:dev-secret-change-me-0123456789abcdefghijklmnop}
     ttl-seconds: ${JWT_TTL_SECONDS:86400}
 
+  mis:
+    enabled: ${MIS_ENABLED:true}
+    base-url: ${MIS_BASE_URL:https://crm-med-mock.dbi-testing.ru/api/v1}
+    token: ${MIS_TOKEN:}
+    timeout-seconds: ${MIS_TIMEOUT_SECONDS:10}
+    rate-limit-per-minute: ${MIS_RATE_LIMIT_PER_MINUTE:8}
+
   # NLU-этап: локальная ONNX-модель "текст -> semantic frame".
   # Модель и токенизатор — СВЯЗАННАЯ ПАРА: веса привязаны к номерам токенов.
   # Старый tokenizer.json (4 интента) переставляет номера относительно новой
