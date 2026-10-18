@@ -11,6 +11,6 @@ public record MisVisit(
         String status,
         @JsonProperty("created_at") String createdAt
 ) {
-    /** Врач, встроенный в запись (стенд отдаёт его сразу). */
-    public record MisDoctor(Long id, @JsonProperty("full_name") String fullName, String specialty, @JsonProperty("is_active") Boolean isActive) {}
+    public record MisDoctor(Long id, @JsonProperty("full_name") String fullName,
+                            String specialty, @JsonProperty("is_active") Boolean isActive) {}
 }

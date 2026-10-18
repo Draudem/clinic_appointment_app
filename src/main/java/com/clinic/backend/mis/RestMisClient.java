@@ -4,6 +4,7 @@ import com.clinic.backend.mis.dto.MisClientDto;
 import com.clinic.backend.mis.dto.MisError;
 import com.clinic.backend.mis.dto.MisEscalation;
 import com.clinic.backend.mis.dto.MisVisit;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +37,7 @@ public class RestMisClient implements MisClient {
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
     private final MisProperties props;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private final HttpClient http;
 
     // Простой rate-limiter (скользящее окно)
