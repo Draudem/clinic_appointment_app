@@ -20,6 +20,15 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Реальная интеграция со стендом «Регистратура» через HTTP.
+ *
+ * <p>Логи маскируют персональные данные (152-ФЗ): ФИО в теле запроса не выводится
+ * целиком, только «Смирнова О.В.». Идентификаторы (client_id, doctor_id, visit_id)
+ * не персональные и логируются как есть — по ним же идёт разбор инцидентов.
+ *
+ * <p>Обработка 429: если стенд присылает {@code Retry-After}, клиент делает
+ * до {@code props.getRetryOn429()} повторов с паузой {@code min(Retry-After, maxWait)}.
+ * Это правильнее, чем сразу уходить к оператору: 429 — временное ограничение,
+ * а не отказ. Политика настраивается без пересборки.
  */
 public class RestMisClient implements MisClient {
 
@@ -37,13 +46,11 @@ public class RestMisClient implements MisClient {
     public RestMisClient(MisProperties props) {
         this.props = props;
 
-        // Принудительно используем IPv4 (иногда в Linux-средах IPv6 отваливается)
         System.setProperty("java.net.preferIPv4Stack", "true");
 
-        // Если в системе задан HTTP_PROXY, Java подхватит его
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(props.getTimeoutSeconds()))
-                .version(HttpClient.Version.HTTP_1_1) // Иногда HTTP/2 ломается на прокси
+                .version(HttpClient.Version.HTTP_1_1)
                 .build();
 
         log.info("Интеграция с МИС включена: {}", props.getBaseUrl());
@@ -60,6 +67,7 @@ public class RestMisClient implements MisClient {
                 "{\"last_name\":\"%s\",\"first_name\":\"%s\",\"birth_date\":\"%s\"}",
                 lastName, firstName, birthDate.format(DATE_FMT)
         );
+        log.info("МИС: POST /clients, пациент {}", mask(lastName, firstName));
         HttpResponse<String> res = send("POST", "/clients", json);
         return parse(res.body(), MisClientDto.class);
     }
@@ -70,6 +78,8 @@ public class RestMisClient implements MisClient {
                 "{\"client_id\":%d,\"doctor_id\":%d,\"scheduled_at\":\"%s\"}",
                 clientId, doctorId, scheduledAt
         );
+        log.info("МИС: POST /visits, client_id={}, doctor_id={}, scheduled_at={}",
+                clientId, doctorId, scheduledAt);
         HttpResponse<String> res = send("POST", "/visits", json);
         return parse(res.body(), MisVisit.class);
     }
@@ -77,15 +87,17 @@ public class RestMisClient implements MisClient {
     @Override
     public MisVisit cancelVisit(Long visitId) {
         String json = "{\"status\":\"Отменена\"}";
+        log.info("МИС: PATCH /visits/{}, отмена", visitId);
         HttpResponse<String> res = send("PATCH", "/visits/" + visitId, json);
         return parse(res.body(), MisVisit.class);
     }
 
     @Override
     public MisEscalation createEscalation(Long clientId, String description) {
-        // Экранируем кавычки в описании, чтобы не сломать JSON
         String safeDesc = description.replace("\"", "\\\"");
         String json = String.format("{\"client_id\":%d,\"description\":\"%s\"}", clientId, safeDesc);
+        log.info("МИС: POST /escalations, client_id={}, описание ({} симв.)",
+                clientId, description == null ? 0 : description.length());
         HttpResponse<String> res = send("POST", "/escalations", json);
         return parse(res.body(), MisEscalation.class);
     }
@@ -95,28 +107,52 @@ public class RestMisClient implements MisClient {
     private HttpResponse<String> send(String method, String path, String body) {
         rateLimit();
         String url = props.getBaseUrl() + path;
-        log.info("МИС: {} {}", method, url); // <--- Логируем каждый запрос
+        log.debug("МИС: {} {}", method, url);
 
-        try {
-            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
-                    .header("Authorization", "Bearer " + props.getToken())
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", "ClinicVoiceAssistant/1.0")
-                    .timeout(Duration.ofSeconds(props.getTimeoutSeconds()));
+        int attempt = 0;
+        int maxAttempts = Math.max(1, props.getRetryOn429() + 1);
+        while (true) {
+            attempt++;
+            try {
+                HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                        .header("Authorization", "Bearer " + props.getToken())
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", "ClinicVoiceAssistant/1.0")
+                        .timeout(Duration.ofSeconds(props.getTimeoutSeconds()));
 
-            if ("POST".equals(method)) b.POST(HttpRequest.BodyPublishers.ofString(body));
-            else if ("PATCH".equals(method)) b.method("PATCH", HttpRequest.BodyPublishers.ofString(body));
-            else b.GET();
+                if ("POST".equals(method)) b.POST(HttpRequest.BodyPublishers.ofString(body));
+                else if ("PATCH".equals(method)) b.method("PATCH", HttpRequest.BodyPublishers.ofString(body));
+                else b.GET();
 
-            HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
-            log.info("МИС: ответ HTTP {}", res.statusCode()); // <--- Логируем ответ
+                HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+                log.debug("МИС: ответ HTTP {} на {} {} (попытка {}/{})",
+                        res.statusCode(), method, path, attempt, maxAttempts);
 
-            handleErrors(res);
-            return res;
-        } catch (java.net.http.HttpConnectTimeoutException e) {
-            throw new MisUnavailableException("Таймаут подключения к МИС (нет доступа к " + props.getBaseUrl() + ")", e);
-        } catch (Exception e) {
-            throw new MisUnavailableException("Ошибка сети при запросе к МИС: " + e.getMessage(), e);
+                if (res.statusCode() == 429 && attempt < maxAttempts) {
+                    long wait = parseRetryAfter(res);
+                    long capped = Math.min(wait, props.getRetryMaxWaitSeconds());
+                    log.warn("МИС: 429 на {} {} — ждём {} с (Retry-After={}, попытка {}/{}), повторяем",
+                            method, path, capped, wait, attempt, maxAttempts);
+                    try {
+                        Thread.sleep(capped * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new MisUnavailableException("Прервано ожидание повтора после 429");
+                    }
+                    continue;
+                }
+
+                handleErrors(res);
+                return res;
+            } catch (java.net.http.HttpConnectTimeoutException e) {
+                throw new MisUnavailableException("Таймаут подключения к МИС (нет доступа к "
+                        + props.getBaseUrl() + ")", e);
+            } catch (MisRateLimitedException | MisUnavailableException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new MisUnavailableException("Ошибка сети при запросе к МИС: "
+                        + e.getMessage(), e);
+            }
         }
     }
 
@@ -132,8 +168,40 @@ public class RestMisClient implements MisClient {
 
         if (code == 400) throw new MisBadRequestException(msg);
         if (code == 409) throw new MisConflictException(msg);
-        if (code == 429) throw new MisUnavailableException("МИС: превышен лимит запросов. " + msg);
+        if (code == 429) {
+            long wait = parseRetryAfter(res);
+            throw new MisRateLimitedException(
+                    "МИС: превышен лимит запросов (429). Retry-After=" + wait + " с. " + msg, wait);
+        }
         throw new MisUnavailableException(msg);
+    }
+
+    /**
+     * Разбирает {@code Retry-After}. По RFC 7231 бывает в двух формах:
+     * секунды ({@code "6"}) или HTTP-дата ({@code "Wed, 21 Oct 2026 07:28:00 GMT"}).
+     * Стенд присылает секунды, но на всякий случай поддерживаем обе.
+     */
+    static long parseRetryAfter(HttpResponse<String> res) {
+        String value = res.headers().firstValue("Retry-After").orElse(null);
+        if (value == null || value.isBlank()) {
+            return MisRateLimitedException.DEFAULT_RETRY_AFTER_SECONDS;
+        }
+        String v = value.trim();
+        if (v.chars().allMatch(Character::isDigit)) {
+            try {
+                return Long.parseLong(v);
+            } catch (NumberFormatException e) {
+                return MisRateLimitedException.DEFAULT_RETRY_AFTER_SECONDS;
+            }
+        }
+        try {
+            var fmt = java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
+            var at = java.time.ZonedDateTime.parse(v, fmt);
+            long seconds = java.time.Duration.between(java.time.ZonedDateTime.now(), at).getSeconds();
+            return Math.max(1L, seconds);
+        } catch (Exception e) {
+            return MisRateLimitedException.DEFAULT_RETRY_AFTER_SECONDS;
+        }
     }
 
     private <T> T parse(String json, Class<T> clazz) {
@@ -154,5 +222,18 @@ public class RestMisClient implements MisClient {
         if (requestCount.incrementAndGet() > props.getRateLimitPerMinute()) {
             throw new MisUnavailableException("Локальный лимит запросов к МИС исчерпан.");
         }
+    }
+
+    /**
+     * Маскирует ФИО для логов: «Смирнова Ольга Викторовна» → «Смирнова О.».
+     */
+    static String mask(String last, String first) {
+        StringBuilder sb = new StringBuilder();
+        if (last != null && !last.isBlank()) sb.append(last.trim());
+        if (first != null && !first.isBlank()) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(first.charAt(0)).append('.');
+        }
+        return sb.length() == 0 ? "—" : sb.toString();
     }
 }

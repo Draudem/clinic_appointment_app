@@ -193,7 +193,13 @@ public class DialogueManager {
         return Turn.transfer(reply, "R-05", "ESCALATED", session.getMissCount());
     }
 
-    /** Превращает ход сценария в ответ существующего HTTP-контракта. */
+    /**
+     * Превращает ход сценария в ответ существующего HTTP-контракта.
+     *
+     * <p>Помимо {@code reply}/{@code stage}/{@code appointment} теперь заполняются
+     * {@code resultCode}, {@code status} и {@code confidence} — чтобы и пациент,
+     * и интегратор, и автотест видели результат без разбора вложенных полей.
+     */
     VoiceReply toReply(DialogueSession session, Turn turn) {
         Map<String, Object> appointment = null;
         if ("BOOKED".equals(turn.resultCode()) || "RESCHEDULED".equals(turn.resultCode())) {
@@ -210,12 +216,89 @@ public class DialogueManager {
             proposal.put("summary", session.getPendingSummary());
         }
         List<String> options = turn.options().stream().map(Turn.Slot::spoken).toList();
-        return new VoiceReply(session.getId(), turn.reply(), turn.stage(),
+        return new VoiceReply(
+                session.getId(),
+                turn.reply(),
+                turn.stage(),
                 turn.action() == Turn.Action.CONTINUE,
-                false, turn.action() == Turn.Action.TRANSFER,
-                options, appointment, proposal,
-                session.getExchanges(), props.getMaxExchanges(),
-                session.getPendingFrame(), "booking-flow");
+                false,
+                turn.action() == Turn.Action.TRANSFER,
+                options,
+                appointment,
+                proposal,
+                session.getExchanges(),
+                props.getMaxExchanges(),
+                session.getPendingFrame(),
+                "booking-flow",
+                turn.resultCode(),
+                statusOf(turn),
+                confidenceOf(turn));
+    }
+
+    /**
+     * Короткий статус для UI: BOOKED | PENDING | ESCALATED | INFO.
+     *
+     * <p>Это то же самое, что {@code resultCode} из {@link Turn}, но приведённое
+     * к четырём значениям, которые удобно показывать в мобильном приложении
+     * и в административной панели. Полный {@code resultCode} остаётся рядом:
+     * он тоньше (BOOKED, RESCHEDULED, CANCELLED, INFO_GIVEN, ESCALATED, EMERGENCY,
+     * COMPLAINT, WAITLISTED, HOME_VISIT_REQUESTED), но для быстрого взгляда
+     * достаточно четырёх групп.
+     */
+    private static String statusOf(Turn turn) {
+        if (turn.action() == Turn.Action.TRANSFER) {
+            return "ESCALATED";
+        }
+        if ("BOOKED".equals(turn.resultCode())
+                || "RESCHEDULED".equals(turn.resultCode())
+                || "CANCELLED".equals(turn.resultCode())
+                || "CONFIRMED".equals(turn.resultCode())) {
+            return "BOOKED";
+        }
+        if (turn.action() == Turn.Action.CONTINUE) {
+            // сценарий ждёт подтверждения или следующей реплики
+            return "PENDING_CONFIRMATION".equals(turn.stage()) ? "PENDING" : "INFO";
+        }
+        // HANGUP без явного BOOKED — это справка/отказ, а не запись
+        return "INFO_GIVEN".equals(turn.resultCode()) ? "INFO" : "DONE";
+    }
+
+    /**
+     * Уверенность ассистента, 0.0…1.0.
+     *
+     * <p>Не «магическое число»: вычисляется из состояния, а не задаётся константой.
+     * Правило простое и объяснимое:
+     * <ul>
+     *   <li>запись создана/изменена → 0.95 (действие в МИС подтверждено);</li>
+     *   <li>справка выдана (INFO_GIVEN) → 0.9 (источник — БД/расписание, не МИС);</li>
+     *   <li>ожидание подтверждения → 0.8 (ассистент уверен в предложении, но пациент
+     *       ещё не сказал «да»);</li>
+     *   <li>перевод оператору → 0.5 (честно: ассистент не справился сам);</li>
+     *   <li>пустой результат → 0.3 (защита от деления на ноль в клиентских формулах).</li>
+     * </ul>
+     *
+     * <p>Точность распознавания речи в это число не входит: STT не отдаёт
+     * вероятность, а подмешивать сюда «на глаз» — значит сделать число
+     * неинтерпретируемым. Если понадобится — расширим {@link Turn} полем
+     * {@code sttConfidence} и объединим явно.
+     */
+    private static double confidenceOf(Turn turn) {
+        if (turn.action() == Turn.Action.TRANSFER) {
+            return 0.5;
+        }
+        if ("BOOKED".equals(turn.resultCode())
+                || "RESCHEDULED".equals(turn.resultCode())
+                || "CANCELLED".equals(turn.resultCode())
+                || "CONFIRMED".equals(turn.resultCode())) {
+            return 0.95;
+        }
+        if ("INFO_GIVEN".equals(turn.resultCode())) {
+            return 0.9;
+        }
+        if (turn.action() == Turn.Action.CONTINUE) {
+            return "PENDING_CONFIRMATION".equals(turn.stage()) ? 0.8 : 0.75;
+        }
+        return 0.3;
     }
 
     /** Последняя созданная запись пациента — для ответа «вы записаны». */

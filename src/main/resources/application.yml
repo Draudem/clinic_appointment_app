@@ -13,7 +13,7 @@ spring:
 
   datasource:
     # Локально: localhost; в Docker — переопределяется env DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
-    url: jdbc:postgresql://${DB_HOST:10.2.173.150}:${DB_PORT:5432}/${DB_NAME:clinic}
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:clinic}
     username: ${DB_USER:clinic}
     password: ${DB_PASSWORD:clinic}
 
@@ -37,11 +37,18 @@ app:
     token: ${MIS_TOKEN:}
     timeout-seconds: 20
     rate-limit-per-minute: ${MIS_RATE_LIMIT_PER_MINUTE:8}
+    retry-on-429: ${MIS_RETRY_ON_429:2}
+    retry-max-wait-seconds: ${MIS_RETRY_MAX_WAIT_SECONDS:5}
+
 
   # NLU-этап: локальная ONNX-модель "текст -> semantic frame".
   # Модель и токенизатор — СВЯЗАННАЯ ПАРА: веса привязаны к номерам токенов.
   # Старый tokenizer.json (4 интента) переставляет номера относительно новой
   # модели, поэтому их нельзя менять по отдельности. См. deploy/export-nlu-model.sh
+  #
+  # Пути по умолчанию — относительные от рабочей директории. В Docker WORKDIR=/app,
+  # файлы моделей копируются в /app/models (см. Dockerfile) и переопределяются
+  # через env NLU_MODEL_PATH / NLU_TOKENIZER_PATH. В README — раздел «Запуск с нуля».
   nlu:
     enabled: ${NLU_ENABLED:true}
     model-path: ${NLU_MODEL_PATH:models/nlu/model.onnx}
@@ -57,10 +64,14 @@ app:
   # Источник расписания: db — из таблицы doctors, excel — из файла .xlsx.
   # Переключается одним флагом, код не меняется: за интерфейсом
   # ScheduleProvider активна ровно одна реализация.
+  #
+  # Путь по умолчанию относительный (data/schedule.xlsx от рабочей директории).
+  # В Docker WORKDIR=/app, файл копируется в /app/data (см. Dockerfile).
+  # На другой машине: либо положить файл по этому пути, либо задать SCHEDULE_EXCEL_PATH.
   schedule:
-    source: excel
+    source: ${SCHEDULE_SOURCE:excel}
     excel:
-      path: /opt/goinfre/kindlyfr/Projects/VoiceAssistant/backend/data/schedule.xlsx
+      path: ${SCHEDULE_EXCEL_PATH:data/schedule.xlsx}
       sheet: ${SCHEDULE_EXCEL_SHEET:}
 
   # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
@@ -76,9 +87,7 @@ app:
     # ВНИМАНИЕ: приветствия здесь нет намеренно. Оно живёт в
     # CallDialogueService.greeting() — дословно по регламенту 3.3, включая
     # обязательную фразу «Разговор записывается» (152-ФЗ). Настройка TTS_GREETING
-    # была удалена, потому что её значение молча игнорировалось: приветствие
-    # задавалось в коде, а читающий конфиг видел чужой текст и думал, что
-    # настройка работает.
+    # была удалена, потому что её значение молча игнорировалось.
     reply-on-silence: "${TTS_REPLY_ON_SILENCE:Спасибо, записываю.}"
     close-delay-seconds: ${TTS_CLOSE_DELAY_SECONDS:2}
 
@@ -87,11 +96,11 @@ app:
   stt:
     enabled: ${STT_ENABLED:true}
     # Открытый (без JWT) доступ к распознанным фразам — только чтение, для наладки.
-    # Перед выкладкой наружу выключить: STT_PUBLIC_READ=false
-    public-read: ${STT_PUBLIC_READ:true}
+    # ВАЖНО (152-ФЗ): по умолчанию ВЫКЛЮЧЕН. Включать только в dev-контуре
+    # (STT_PUBLIC_READ=true) и никогда — на боевом контуре с реальными пациентами.
+    public-read: ${STT_PUBLIC_READ:false}
     # Адрес, который подставляется в клиент проверки связи (/api/stt/public/client).
     # Пусто = берётся из того адреса, по которому клиент сам пришёл за скриптом.
-    # Задавать явно нужно, если снаружи несколько интерфейсов (VPN, docker, 0.0.0.0).
     advertised-host: ${STT_ADVERTISED_HOST:}
     # TCP-порт AudioSocket. Asterisk подключается СЮДА, а не на HTTP-порт.
     audiosocket-port: ${STT_AUDIOSOCKET_PORT:8091}
@@ -99,17 +108,11 @@ app:
     model-dir: ${STT_MODEL_DIR:models/stt/sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19}
     num-threads: ${STT_NUM_THREADS:2}
     # Пауза тишины, которая считается концом фразы (секунды)
-    # Пауза, которой мы ждём конца фразы. 1,2 с было с запасом; замер показал,
-    # что весь этот запас уходит в тишину: пациент замолчал — и мы молчим ещё
-    # секунду с лишним, прежде чем распознать. 0,8 — минимум, при котором
-    # пауза внутри фразы («в пятницу… в девять») не разрезает её на части.
     silence-seconds: ${STT_SILENCE_SECONDS:0.6}
     # Максимальная длина одной фразы, после неё форсируем распознавание (секунды)
     max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:6}
     silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.03}
     # Отдавать ли распознанный текст обратно в сокет.
-    # true  -> синтез речи TTS и отправка аудио (0x10) обратно в Asterisk;
-    # false -> в сокет уходит только тишина, текст забирают по HTTP (режим заглушки).
     speak-replies: ${STT_SPEAK_REPLIES:false}
 
   # LLM-этап (задел под Ollama / OpenAI-совместимый API). По умолчанию выключен:

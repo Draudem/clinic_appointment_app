@@ -6,6 +6,7 @@ import com.clinic.backend.mis.MisClock;
 import com.clinic.backend.schedule.ScheduleEntry;
 import com.clinic.backend.schedule.ScheduleProvider;
 import org.springframework.stereotype.Component;
+import com.clinic.backend.rag.ClinicalKnowledgeBase;
 
 import java.time.Duration;
 import java.time.LocalDate;
@@ -33,10 +34,7 @@ public class SlotResolver {
 
     private final ScheduleProvider schedule;
     private final AppointmentRepository appointments;
-
     private final MisClock clock;
-
-
 
     public SlotResolver(ScheduleProvider schedule, AppointmentRepository appointments, MisClock clock) {
         this.schedule = schedule;
@@ -46,22 +44,27 @@ public class SlotResolver {
 
     /** Есть ли вообще врачи по специальности. */
     public boolean specialtyStaffed(String specialty) {
-        LocalDate today = clock.today(); // <--- Используем часы МИС
-        return specialty != null && !schedule.bySpecialty(specialty, today, today).isEmpty();
+        if (specialty == null) return false;
+        LocalDate today = clock.today();
+        // Смотрим не только «сегодня», а весь горизонт записи: воскресенье —
+        // не повод говорить «приёма нет», если завтра стоматолог работает.
+        return !schedule.bySpecialty(specialty, today, today.plusDays(HORIZON_DAYS - 1)).isEmpty();
     }
 
     /** Названия специальностей, по которым ведётся запись. */
     public List<String> availableSpecialties() {
-        // Ищем не только на сегодня, но и на 14 дней вперед,
-        // чтобы список не был пустым, если сегодня выходной
         LocalDate from = clock.today();
         LocalDate to = from.plusDays(14);
-
+        Set<String> core = Set.of("Терапевт", "Педиатр", "Стоматолог-терапевт",
+                "Лор (отоларинголог)", "Офтальмолог", "Хирург", "Акушер-гинеколог",
+                "Невролог", "Кардиолог", "Дерматовенеролог", "Эндокринолог");
         return schedule.all(from, to).stream()
                 .map(ScheduleEntry::specialty)
                 .filter(Objects::nonNull)
+                .filter(core::contains)
                 .distinct()
                 .sorted()
+                .limit(10)
                 .toList();
     }
 
@@ -105,6 +108,12 @@ public class SlotResolver {
      *
      * Держится в пределах горизонта и отбрасывает прошедшее сегодняшнее время —
      * иначе можно предложить слот, который уже нельзя взять.
+     *
+     * ВАЖНО: если после применения горизонта from > to (пациент назвал дату
+     * дальше, чем 14 дней), возвращаем ПУСТО ЯВНО. Раньше это получалось
+     * «случайно»: провайдер возвращал пустой список из-за инвертированного
+     * диапазона, и тест на далёкую дату проходил по случайной причине.
+     * Теперь поведение выражено в коде и не зависит от реализации провайдера.
      */
     private List<ScheduleEntry> candidates(String specialty, TimeResolver.TimePreference pref,
                                            LocalDate today) {
@@ -118,12 +127,15 @@ public class SlotResolver {
         // Горизонт отсчитывается от СЕГОДНЯ, а не от названной даты. Раньше окно
         // просто сдвигалось: пациент называл дату через полгода — и мы предлагали
         // запись на неё, хотя поликлиника открывает расписание на 14 дней вперёд.
-        // На живом звонке так в запись-подтверждение уехала дата рождения
-        // («двенадцатое марта») — запись предлагалась на март следующего года.
         LocalDate to = from.plusDays(HORIZON_DAYS - 1);
         LocalDate maxDate = today.plusDays(HORIZON_DAYS - 1);
         if (to.isAfter(maxDate)) {
             to = maxDate;
+        }
+        if (from.isAfter(to)) {
+            // пожелание за пределами горизонта: ответ «записей нет»,
+            // а не «случайно пусто у провайдера»
+            return List.of();
         }
 
         TimeResolver.TimePreference p = pref == null
@@ -162,8 +174,6 @@ public class SlotResolver {
             LocalDateTime start = e.date().atTime(java.time.LocalTime.parse(e.time()));
             return clock.now().isAfter(start.minusMinutes(SAME_DAY_MINUTES_BEFORE));
         } catch (Exception ex) {
-            // Если время не парсится (например, "31.12.1899 13:40"),
-            // считаем, что слот не в прошлом, чтобы не ронять звонок.
             return false;
         }
     }

@@ -10,6 +10,13 @@ WORKDIR /app
 # Имя файла фиксировано — совпадает с именем артефакта Gradle
 COPY clinic-backend-0.1.0.jar /app/app.jar
 
+# Расписание врачей (Excel). Путь в application.yml — data/schedule.xlsx,
+# что при WORKDIR=/app соответствует /app/data/schedule.xlsx.
+# Если файла в build-контексте нет — контейнер всё равно соберётся:
+# источник расписания просто вернёт «нет слотов» и сценарий уйдёт на оператора
+# (это корректное поведение, а не падение).
+COPY data/ /app/data/
+
 # Локальная NLU-модель коллеги из ai_model/clinic_lm/models.
 # ВАЖНО: model.onnx и tokenizer.json — ПАРНЫЕ (у каждого чекпоинта свой vocab),
 # смешивать файлы из разных папок нельзя.

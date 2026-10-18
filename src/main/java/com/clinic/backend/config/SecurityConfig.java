@@ -8,6 +8,7 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
@@ -28,15 +29,19 @@ public class SecurityConfig {
     }
 
     /**
-     * Пароли хранятся и сравниваются как есть. В API они не отдаются:
-     * /api/users возвращает DTO без поля password, поэтому администратор
-     * пароли не видит.
-     * Замена на bcrypt = вернуть здесь new BCryptPasswordEncoder() и перекодировать
-     * существующие строки; контракт API и остальной код не меняются.
+     * Пароли хранятся как BCrypt-хеш (152-ФЗ, требование к защите ПДн).
+     *
+     * <p>Раньше здесь стоял PlainTextPasswordEncoder: пароли лежали в БД открытым
+     * текстом, и любой дамп базы раскрывал учётные данные пациентов. Это прямое
+     * нарушение требований к ИСПДн (ПП № 1119, приказ ФСТЭК № 21) — даже при том,
+     * что в API пароль не отдаётся.
+     *
+     * <p>Миграция: существующие записи (admin/admin123, демо-пациенты) хешируются
+     * при первом старте скриптом DataSeeder — см. PasswordMigration.
      */
     @Bean
     public PasswordEncoder passwordEncoder() {
-        return new PlainTextPasswordEncoder();
+        return new BCryptPasswordEncoder(10);
     }
 
     @Bean
@@ -51,12 +56,14 @@ public class SecurityConfig {
                         .requestMatchers("/api/health", "/error").permitAll()
                         // Swagger UI / OpenAPI — страница со всеми эндпоинтами
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
-                        // Отладочный доступ к распознанным фразам — только чтение, без JWT.
-                        // Нужен для наладки телефонии (напарник с Asterisk), чтобы не возиться
-                        // с токеном при отладке. Основной /api/stt/* остаётся под авторизацией.
-                        // ВНИМАНИЕ: это транскрипты разговоров — в продакшене закрыть.
-                        .requestMatchers("/api/stt/public/**").permitAll()
+                        // ВАЖНО: /api/stt/public/** раньше был permitAll — это транскрипты
+                        // разговоров с пациентами, то есть персональные данные (152-ФЗ).
+                        // Теперь под JWT. Для наладки телефонии есть флаг STT_PUBLIC_READ:
+                        // при true контроллер сам отдаёт данные, но security его всё равно
+                        // не пустит — так безопаснее (двойная защита).
+                        .requestMatchers("/api/stt/public/**").authenticated()
                         // всё остальное — только с валидным JWT
+                        //.requestMatchers(HttpMethod.POST, "/api/nlu/parse", "/api/nlu/status").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e
                         .authenticationEntryPoint((request, response, ex) -> {
@@ -73,10 +80,6 @@ public class SecurityConfig {
         return http.build();
     }
 
-    /**
-     * CORS открыт для фронтенда (статика может отдаваться с другого origin/port).
-     * В Docker можно сузить через env CORS_ALLOWED_ORIGINS.
-     */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();

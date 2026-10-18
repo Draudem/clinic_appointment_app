@@ -8,8 +8,13 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 
+/**
+ * Фиксирует факт перевода в МИС (заявка типа «Требует внимания оператора»).
+ * Логи не содержат ФИО пациента целиком (152-ФЗ) — только маскированное.
+ */
 @Service
 public class EscalationService {
+
     private static final Logger log = LoggerFactory.getLogger(EscalationService.class);
     private final MisClient misClient;
 
@@ -17,14 +22,18 @@ public class EscalationService {
         this.misClient = misClient;
     }
 
-    public void escalate(String lastName, String firstName, LocalDate birthDate, String description, String ruleCode) {
+    public void escalate(String lastName, String firstName, LocalDate birthDate,
+                         String description, String ruleCode) {
         if (!misClient.available()) return;
         try {
             MisClientDto client = misClient.findOrCreateClient(lastName, firstName, birthDate);
+            // В description могут быть персональные данные (жалоба, симптомы).
+            // МИС получает текст целиком, но в лог пишем только код правила и длину.
             misClient.createEscalation(client.id(), "[" + ruleCode + "] " + description);
-            log.info("Эскалация {} успешно зафиксирована в МИС", ruleCode);
+            log.info("Эскалация {} зафиксирована в МИС (client_id={}, {} симв. описания)",
+                    ruleCode, client.id(), description == null ? 0 : description.length());
         } catch (Exception e) {
-            log.warn("Не удалось зафиксировать эскалацию в МИС: {}", e.getMessage());
+            log.warn("Не удалось зафиксировать эскалацию {}: {}", ruleCode, e.getMessage());
         }
     }
 }

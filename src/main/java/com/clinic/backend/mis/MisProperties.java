@@ -24,6 +24,21 @@ public class MisProperties {
     /** Локальный лимит запросов (стенд позволяет 10/мин, ставим 8 для запаса). */
     private int rateLimitPerMinute = 8;
 
+    /**
+     * Сколько раз повторять запрос при 429 (Retry-After).
+     * По умолчанию 2: стенд даёт 10/мин, локальный лимит 8, так что штатно
+     * до 429 доходить не должно, но при всплеске (несколько звонков сразу)
+     * повтор дешевле, чем перевод оператору.
+     */
+    private int retryOn429 = 2;
+
+    /**
+     * Верхняя граница ожидания повтора, секунды. Если стенд просит больше
+     * (например, 60), не ждём — переводим оператору: пациент не должен
+     * висеть на линии минуту.
+     */
+    private int retryMaxWaitSeconds = 5;
+
     // --- Геттеры и сеттеры ---
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -35,4 +50,8 @@ public class MisProperties {
     public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
     public int getRateLimitPerMinute() { return rateLimitPerMinute; }
     public void setRateLimitPerMinute(int rateLimitPerMinute) { this.rateLimitPerMinute = rateLimitPerMinute; }
+    public int getRetryOn429() { return retryOn429; }
+    public void setRetryOn429(int retryOn429) { this.retryOn429 = retryOn429; }
+    public int getRetryMaxWaitSeconds() { return retryMaxWaitSeconds; }
+    public void setRetryMaxWaitSeconds(int retryMaxWaitSeconds) { this.retryMaxWaitSeconds = retryMaxWaitSeconds; }
 }

@@ -4,11 +4,7 @@ import com.clinic.backend.appointment.AppointmentService;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
 import com.clinic.backend.identity.PatientNameParser;
-import com.clinic.backend.mis.EscalationService;
-import com.clinic.backend.mis.MisBadRequestException;
-import com.clinic.backend.mis.MisClient;
-import com.clinic.backend.mis.MisConflictException;
-import com.clinic.backend.mis.MisUnavailableException;
+import com.clinic.backend.mis.*;
 import com.clinic.backend.mis.dto.MisClientDto;
 import com.clinic.backend.mis.dto.MisVisit;
 import com.clinic.backend.rag.ClinicalKnowledgeBase;
@@ -18,8 +14,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +35,8 @@ public class BookingFlow {
     private static final int RESCHEDULE_OPTIONS = 3;
     private static final int BOOKING_OPTIONS = 1;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+    private static final DateTimeFormatter DATETIME_FMT =
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
 
     private final CommandParser parser;
     private final SlotResolver slots;
@@ -44,9 +45,8 @@ public class BookingFlow {
     private final DialogueSessionRepository sessions;
     private final ScheduleQueryService scheduleQueries;
     private final MisClient misClient;
-    private final EscalationService escalationService; // <-- ДОБАВЛЕНО ПОЛЕ
+    private final EscalationService escalationService;
 
-    // <-- ИСПРАВЛЕННЫЙ КОНСТРУКТОР
     public BookingFlow(CommandParser parser, SlotResolver slots, AppointmentService appointments,
                        PatientIdentityResolver identity, DialogueSessionRepository sessions,
                        ScheduleQueryService scheduleQueries, MisClient misClient,
@@ -173,7 +173,7 @@ public class BookingFlow {
     }
 
     private void rememberTime(DialogueSession session, ParsedCommand parsed, String text) {
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         session.setWantedDate(pref.date() == null ? null : pref.date().toString());
         session.setWantedTime(pref.exact());
@@ -181,7 +181,7 @@ public class BookingFlow {
 
     private Optional<Turn.Slot> findExact(DialogueSession session, String specialty,
                                           ParsedCommand parsed, String text) {
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         TimeResolver.TimePreference pref = TimeResolver.resolve(parsed.timeFactors(), text, today);
         if (pref.isEmpty()) return Optional.empty();
         return slots.findSlot(specialty, pref, today).map(this::toSlot);
@@ -208,7 +208,7 @@ public class BookingFlow {
     }
 
     private Turn offerSlots(DialogueSession session, String greeting) {
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         TimeResolver.TimePreference pref = from(session);
         List<SlotResolver.Slot> found = slots.offerSlots(session.getSpecialty(), pref, today, BOOKING_OPTIONS);
         if (found.isEmpty()) {
@@ -236,7 +236,7 @@ public class BookingFlow {
     Turn.Slot pickSlot(List<Turn.Slot> offered, String text) {
         if (offered.isEmpty() || text == null) return null;
         String q = ClinicalKnowledgeBase.normalize(text);
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         LocalDate saidDate = RussianTime.parseDayMonth(q, today);
         if (saidDate == null) saidDate = RussianTime.parseNumericDate(q, today);
         if (saidDate == null && q.contains("завтра")) saidDate = today.plusDays(1);
@@ -276,7 +276,8 @@ public class BookingFlow {
         return false;
     }
 
-    private static final java.time.format.DateTimeFormatter HHMM = java.time.format.DateTimeFormatter.ofPattern("HH:mm");
+    private static final java.time.format.DateTimeFormatter HHMM =
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm");
 
     private LocalDate byWeekday(String q, LocalDate today) {
         for (java.time.DayOfWeek d : java.time.DayOfWeek.values()) {
@@ -333,7 +334,7 @@ public class BookingFlow {
                 return toConfirm(session, "Понял. ", another);
             }
             if ("BOOK".equals(session.getPendingAction()) && session.getSpecialty() != null) {
-                LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+                LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
                 TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
                 Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
                 if (other.isPresent()) {
@@ -360,10 +361,14 @@ public class BookingFlow {
 
     private Turn doBook(DialogueSession session) {
         String login = session.getPatientLogin();
-        if (login == null || login.isBlank()) return transfer(session, "Не получается определить пациента. Соединяю с регистратором.", "R-07");
+        if (login == null || login.isBlank()) {
+            return transfer(session, "Не получается определить пациента. Соединяю с регистратором.", "R-07");
+        }
 
         PatientIdentity who = identity.findByLogin(login).orElse(null);
-        if (who == null || who.last() == null || who.birthDate() == null) return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        if (who == null || who.last() == null || who.birthDate() == null) {
+            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        }
 
         try {
             MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
@@ -377,6 +382,8 @@ public class BookingFlow {
             appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
 
             Integer cabinet = session.getPendingCabinet();
+            // scheduledAt приходит из МИС в формате ДД.ММ.ГГГГ ЧЧ:ММ — парсим общим парсером,
+            // а не LocalDate.parse (тот ждёт ISO и падал бы на живом стенде)
             String reply = "Готово, вы записаны. " + spokenDate(visit.scheduledAt(), "")
                     + ", " + visit.doctor().fullName()
                     + (cabinet == null ? "" : ", кабинет " + RussianTime.number(cabinet))
@@ -395,6 +402,17 @@ public class BookingFlow {
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
 
+        } catch (MisRateLimitedException e) {
+            log.warn("МИС: 429 при записи/переносе (Retry-After={} с): {}",
+                    e.retryAfterSeconds(), e.getMessage());
+            session.clearPending();
+            // Не «система недоступна», а «секунду подождите»: запись не потеряна,
+            // просто МИС просит сбавить темп. Пациенту честнее сказать именно так.
+            return transfer(session,
+                    "Секунду, проверяю расписание ещё раз. Соединяю с регистратором — он запишет без задержки.",
+                    "R-06");
+
+
         } catch (MisUnavailableException e) {
             log.error("МИС недоступна при создании записи: {}", e.getMessage());
             session.clearPending();
@@ -405,7 +423,8 @@ public class BookingFlow {
     private Turn offerMove(DialogueSession session, String greeting, Map<String, Object> existing) {
         session.setPendingAppointmentId(((Number) existing.get("id")).longValue());
         session.setStage("DUP");
-        String reply = greeting + "У вас уже есть запись: " + existing.get("doctorName") + ", " + spokenDate(existing.get("date"), existing.get("time")) + ". Хотите перенести её?";
+        String reply = greeting + "У вас уже есть запись: " + existing.get("doctorName") + ", "
+                + spokenDate(existing.get("date"), existing.get("time")) + ". Хотите перенести её?";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "DUP", List.of(), 0);
     }
@@ -441,7 +460,7 @@ public class BookingFlow {
 
     private Turn offerReschedule(DialogueSession session) {
         String specialty = session.getSpecialty();
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         TimeResolver.TimePreference pref = from(session);
 
         boolean named = session.getWantedDate() != null || session.getWantedTime() != null;
@@ -492,7 +511,7 @@ public class BookingFlow {
             if (picked != null) return toRescheduleConfirm(session, picked);
         }
         if (session.getSpecialty() != null) {
-            LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+            LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
             TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
             Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
             if (other.isPresent()) return toRescheduleConfirm(session, other.get());
@@ -505,10 +524,14 @@ public class BookingFlow {
     private Turn doReschedule(DialogueSession session) {
         String login = session.getPatientLogin();
         Long oldId = session.getPendingAppointmentId();
-        if (login == null || login.isBlank() || oldId == null) return transfer(session, "Соединяю с регистратором — он перенесёт запись.", "R-07");
+        if (login == null || login.isBlank() || oldId == null) {
+            return transfer(session, "Соединяю с регистратором — он перенесёт запись.", "R-07");
+        }
 
         PatientIdentity who = identity.findByLogin(login).orElse(null);
-        if (who == null || who.last() == null || who.birthDate() == null) return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        if (who == null || who.last() == null || who.birthDate() == null) {
+            return transfer(session, "В карточке не хватает данных. Соединяю с регистратором.", "R-07");
+        }
 
         try {
             MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
@@ -519,12 +542,17 @@ public class BookingFlow {
 
             MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
 
-            try { misClient.cancelVisit(oldId); } catch (Exception e) { log.warn("Не удалось отменить старую запись {} в МИС: {}", oldId, e.getMessage()); }
+            try {
+                misClient.cancelVisit(oldId);
+            } catch (Exception e) {
+                log.warn("Не удалось отменить старую запись {} в МИС: {}", oldId, e.getMessage());
+            }
 
             appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
             appointments.cancel(login, oldId, false);
 
-            String reply = "Готово, запись перенесена на " + spokenDate(visit.scheduledAt(), "") + ". Прежняя запись отменена.";
+            String reply = "Готово, запись перенесена на " + spokenDate(visit.scheduledAt(), "")
+                    + ". Прежняя запись отменена.";
             session.clearPending();
             session.setStage("CONFIRMED");
             session.append("ассистент", reply);
@@ -537,6 +565,17 @@ public class BookingFlow {
             session.setStage("OFFER");
             session.append("ассистент", reply);
             return Turn.continueWith(reply, "OFFER", List.of(), 0);
+
+        } catch (MisRateLimitedException e) {
+            log.warn("МИС: 429 при записи/переносе (Retry-After={} с): {}",
+                    e.retryAfterSeconds(), e.getMessage());
+            session.clearPending();
+            // Не «система недоступна», а «секунду подождите»: запись не потеряна,
+            // просто МИС просит сбавить темп. Пациенту честнее сказать именно так.
+            return transfer(session,
+                    "Секунду, проверяю расписание ещё раз. Соединяю с регистратором — он запишет без задержки.",
+                    "R-06");
+
 
         } catch (MisUnavailableException e) {
             log.error("МИС недоступна при переносе: {}", e.getMessage());
@@ -551,7 +590,8 @@ public class BookingFlow {
 
     private Turn onIdentity(DialogueSession session, PatientIdentity who, String text) {
         PatientNameParser.Data data = PatientNameParser.parse(text);
-        String login = session.getPatientLogin() == null || session.getPatientLogin().isBlank() ? (who.login()) : session.getPatientLogin();
+        String login = session.getPatientLogin() == null || session.getPatientLogin().isBlank()
+                ? (who.login()) : session.getPatientLogin();
 
         if (login != null && !login.isBlank() && !data.hasFio() && !data.hasBirthDate()) {
             PatientIdentity found = identity.findByFioAndBirthDate(who.fio(), who.birthDate()).orElse(who);
@@ -564,7 +604,9 @@ public class BookingFlow {
         if (fio != null) session.setSaidFio(fio);
         if (birth != null) session.setSaidBirthDate(birth.toString());
 
-        if (fio == null && birth == null) return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.");
+        if (fio == null && birth == null) {
+            return askIdentity(session, "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.");
+        }
         if (fio == null) return askIdentity(session, "Назовите, пожалуйста, фамилию, имя и отчество.");
         if (birth == null) return askIdentity(session, "Назовите, пожалуйста, дату рождения.");
 
@@ -599,7 +641,7 @@ public class BookingFlow {
     }
 
     private Turn continueScenario(DialogueSession session, PatientIdentity p) {
-        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));;
+        LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
         TimeResolver.TimePreference pref = from(session);
         String greeting = p.addressName().isBlank() ? "" : "Спасибо, " + p.addressName() + ". ";
 
@@ -617,7 +659,8 @@ public class BookingFlow {
     Optional<Map<String, Object>> activeBooking(PatientIdentity who, String specialty) {
         if (who == null || !who.identified()) return Optional.empty();
         for (Map<String, Object> a : appointments.listFor(who.login(), false)) {
-            if ("CONFIRMED".equals(a.get("status")) && (specialty == null || specialty.equals(a.get("specialty")))) {
+            if ("CONFIRMED".equals(a.get("status"))
+                    && (specialty == null || specialty.equals(a.get("specialty")))) {
                 return Optional.of(a);
             }
         }
@@ -650,11 +693,45 @@ public class BookingFlow {
         return new Turn.Slot(s.doctorId(), s.fio(), s.specialty(), s.date(), s.time(), s.cabinet());
     }
 
+    /**
+     * Разбирает дату/время из МИС и из локальной БД в один формат.
+     *
+     * <p>МИС возвращает {@code scheduledAt} строкой {@code ДД.ММ.ГГГГ ЧЧ:ММ} (документация
+     * стенда), а из БД приходит ISO-дата {@code YYYY-MM-DD}. Раньше здесь стоял
+     * {@code LocalDate.parse(String.valueOf(date))}, и на реальном ответе МИС
+     * «16.10.2026 11:00» он падал с DateTimeParseException — то есть запись в МИС
+     * создавалась, а ответ пациенту не формировался, и звонок обрывался.
+     * Теперь оба формата разбираются явно.
+     */
     static String spokenDate(Object date, Object time) {
         if (date == null) return "";
-        LocalDate d = LocalDate.parse(String.valueOf(date));
-        String t = time == null ? null : String.valueOf(time);
-        return t == null || t.isBlank() ? RussianTime.sayDate(d) : RussianTime.sayDateTime(d, t);
+        LocalDate d = parseAnyDate(String.valueOf(date));
+        if (d == null) return "";
+        String t = time == null || String.valueOf(time).isBlank() ? null : String.valueOf(time);
+        return t == null ? RussianTime.sayDate(d) : RussianTime.sayDateTime(d, t);
+    }
+
+    /** Разбирает дату в ISO ({@code 2026-10-16}) или в {@code ДД.ММ.ГГГГ [ЧЧ:ММ]}. */
+    private static LocalDate parseAnyDate(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.trim();
+        try {
+            return LocalDate.parse(s);                       // ISO
+        } catch (DateTimeParseException ignored) {
+            // не ISO
+        }
+        try {
+            return LocalDate.parse(s, DATE_FMT);             // ДД.ММ.ГГГГ
+        } catch (DateTimeParseException ignored) {
+            // не дата-only
+        }
+        try {
+            return LocalDateTime.parse(s, DATETIME_FMT).toLocalDate();   // ДД.ММ.ГГГГ ЧЧ:ММ
+        } catch (DateTimeParseException ignored) {
+            // не наш формат
+        }
+        log.warn("Не удалось разобрать дату из ответа МИС: «{}»", raw);
+        return null;
     }
 
     static String encode(List<Turn.Slot> slots) {
@@ -682,8 +759,11 @@ public class BookingFlow {
     }
 
     static TimeResolver.TimePreference from(DialogueSession session) {
-        LocalDate date = session.getWantedDate() == null || session.getWantedDate().isBlank() ? null : LocalDate.parse(session.getWantedDate());
-        String time = session.getWantedTime() == null || session.getWantedTime().isBlank() ? null : session.getWantedTime();
-        return new TimeResolver.TimePreference(date, time, null, null, null, false, date == null && time == null ? "" : "по выбору пациента");
+        LocalDate date = session.getWantedDate() == null || session.getWantedDate().isBlank()
+                ? null : LocalDate.parse(session.getWantedDate());
+        String time = session.getWantedTime() == null || session.getWantedTime().isBlank()
+                ? null : session.getWantedTime();
+        return new TimeResolver.TimePreference(date, time, null, null, null, false,
+                date == null && time == null ? "" : "по выбору пациента");
     }
 }

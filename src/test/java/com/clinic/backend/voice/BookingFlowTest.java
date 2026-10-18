@@ -1,7 +1,6 @@
 package com.clinic.backend.voice;
 
 import com.clinic.backend.appointment.AppointmentService;
-import com.clinic.backend.appointment.AppointmentRepository;
 import com.clinic.backend.doctor.DoctorRepository;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
@@ -21,15 +20,23 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-
-@Disabled("Требует сложной настройки моков для MisClock")
+/**
+ * Полный цикл С-01: спец-ть -> идентификация -> подтверждение -> запись в МИС.
+ *
+ * <p>Тест был @Disabled «требует сложной настройки моков для MisClock». Проблема
+ * оказалась в другом: {@code SlotResolver} создавался РЕАЛЬНЫМ объектом, а его
+ * методы мокались через {@code when(slots.xxx(anyString()))}. Mockito так делать
+ * нельзя — {@code when()} работает только с mock-объектами; matcher {@code anyString()}
+ * остаётся в стеке, и следующий вызов мока падает с InvalidUseOfMatchersException.
+ *
+ * <p>Правильно — мокать {@code SlotResolver} целиком. Этот тест проверяет
+ * {@code BookingFlow}, а не подбор слотов (для подбора — SlotHorizonTest).
+ */
 class BookingFlowTest {
 
     private BookingFlow flow;
@@ -40,7 +47,10 @@ class BookingFlowTest {
     private MisClient misClient;
     private EscalationService escalationService;
 
-    private static final LocalDate TODAY = LocalDate.now();
+    /** Один экземпляр часов на весь тест: TODAY и все проверки — в GMT+4. */
+    private static final MisClock CLOCK = new MisClock();
+    private static final LocalDate TODAY = CLOCK.today();
+
     private static final PatientIdentity SMITH =
             new PatientIdentity(1L, "smirnova", "Смирнова", "Ольга", "Викторовна",
                     LocalDate.of(1978, 3, 12), "+79001234567", "test");
@@ -58,7 +68,9 @@ class BookingFlowTest {
         when(misClient.findOrCreateClient(anyString(), anyString(), any(LocalDate.class)))
                 .thenReturn(new MisClientDto(1L, "Смирнова", "Ольга", "12.03.1978"));
         when(misClient.createVisit(any(), any(), anyString()))
-                .thenReturn(new MisVisit(99L, 1L, new MisVisit.MisDoctor(3L, "Смирнов Алексей Викторович", "Стоматолог", true), "16.10.2026 11:00", "Запланирована", "14.10.2026 12:00"));
+                .thenReturn(new MisVisit(99L, 1L,
+                        new MisVisit.MisDoctor(3L, "Смирнов Алексей Викторович", "Стоматолог", true),
+                        "16.10.2026 11:00", "Запланирована", "14.10.2026 12:00"));
 
         // Настройка парсера
         when(parser.parse(anyString())).thenAnswer(inv -> {
@@ -75,16 +87,18 @@ class BookingFlowTest {
                     false, specialty == null, specialty == null, "", "test");
         });
 
-        // Используем РЕАЛЬНЫЙ MisClock для SlotResolver, чтобы избежать ошибок матчеров
-        MisClock clock = new MisClock();
-        slots = new SlotResolver(mock(ScheduleProvider.class), mock(AppointmentRepository.class), clock);
+        // ВАЖНО: SlotResolver мокается целиком, а не создаётся реальным.
+        // Иначе when(slots.specialtyStaffed(anyString())) вызывает РЕАЛЬНЫЙ метод
+        // с matcher-аргументом (null), matcher не гасится в when(), стек
+        // загрязняется и следующий when() падает с InvalidUseOfMatchersException.
+        slots = mock(SlotResolver.class);
 
         when(slots.specialtyStaffed(anyString())).thenReturn(true);
         when(slots.availableSpecialties()).thenReturn(List.of("Терапевт", "Стоматолог", "ЛОР"));
         when(slots.offerSlots(anyString(), any(), any(), org.mockito.ArgumentMatchers.anyInt()))
                 .thenReturn(testSlots());
         when(slots.findSlot(anyString(), any(), any()))
-                .thenReturn(Optional.of(new SlotResolver.Slot(testSlots().get(0).entry())));
+                .thenReturn(Optional.of(testSlots().get(0)));
 
         when(appointments.listFor(anyString(), any(Boolean.class))).thenReturn(List.of());
         when(appointments.book(anyString(), any(), any(), anyString()))
@@ -115,10 +129,6 @@ class BookingFlowTest {
 
     private Turn say(String text) {
         return flow.handle(session, PatientIdentity.unknown(), text);
-    }
-
-    private Turn say(String text, PatientIdentity who) {
-        return flow.handle(session, who, text);
     }
 
     @Nested

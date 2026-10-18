@@ -1,5 +1,6 @@
 package com.clinic.backend.voice;
 
+import com.clinic.backend.mis.MisClient;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -33,20 +34,24 @@ public class VoiceController {
     private final DialogueSessionRepository sessions;
     private final CommandParser parser;
     private final VoiceProperties props;
+    private final MisClient misClient;
 
     public VoiceController(DialogueManager dialogue,
                            SpeechToText speechToText,
                            DialogueSessionRepository sessions,
                            CommandParser parser,
-                           VoiceProperties props) {
+                           VoiceProperties props,
+                           MisClient misClient) {
         this.dialogue = dialogue;
         this.speechToText = speechToText;
         this.sessions = sessions;
         this.parser = parser;
         this.props = props;
+        this.misClient = misClient;
     }
 
-    public record VoiceTextRequest(Long sessionId, @NotBlank(message = "text обязателен") String text) {
+    public record VoiceTextRequest(Long sessionId,
+                                   @NotBlank(message = "text обязателен") String text) {
     }
 
     @PostMapping("/command")
@@ -74,14 +79,24 @@ public class VoiceController {
         }
     }
 
+    /**
+     * Диагностика голосового контура: активный парсер, режим STT, лимит обменов
+     * и — главное — доступна ли реальная МИС.
+     *
+     * <p>{@code misAvailable} различает «RestMisClient настроен и работает»
+     * и «DisabledMisClient (нет токена / MIS_ENABLED=false)». Без него не видно,
+     * почему запись уходит оператору: то ли МИС недоступна, то ли что-то ещё.
+     */
     @GetMapping("/parser")
-    @Operation(summary = "Какой парсер команд активен")
+    @Operation(summary = "Какой парсер команд активен и доступна ли МИС")
     public Map<String, Object> parser() {
         Map<String, Object> info = new LinkedHashMap<>();
         info.put("parser", parser.name());
         info.put("configured", props.getParser());
         info.put("speechToText", speechToText.name());
         info.put("maxExchanges", props.getMaxExchanges());
+        info.put("misAvailable", misClient.available());
+        info.put("misClient", misClient.getClass().getSimpleName());
         return info;
     }
 

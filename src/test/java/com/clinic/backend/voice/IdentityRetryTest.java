@@ -1,7 +1,6 @@
 package com.clinic.backend.voice;
 
 import com.clinic.backend.appointment.AppointmentService;
-import com.clinic.backend.appointment.AppointmentRepository;
 import com.clinic.backend.doctor.DoctorRepository;
 import com.clinic.backend.identity.PatientIdentity;
 import com.clinic.backend.identity.PatientIdentityResolver;
@@ -11,7 +10,6 @@ import com.clinic.backend.mis.MisClock;
 import com.clinic.backend.schedule.ScheduleEntry;
 import com.clinic.backend.schedule.ScheduleProvider;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -26,8 +24,14 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-
-@Disabled("Требует сложной настройки моков для MisClock")
+/**
+ * Лестница Р-05 на этапе идентификации: две неудачи — и оператор.
+ *
+ * <p>Раньше тест был @Disabled. Причина — та же, что в BookingFlowTest:
+ * {@code SlotResolver} создавался реальным, но мокались его методы, из-за чего
+ * Mockito matcher-стек загрязнялся и падал с InvalidUseOfMatchersException.
+ * Правильно — мокать {@code SlotResolver} целиком.
+ */
 class IdentityRetryTest {
 
     private BookingFlow flow;
@@ -37,6 +41,9 @@ class IdentityRetryTest {
     private DialogueSession session;
     private MisClient misClient;
     private EscalationService escalationService;
+
+    private static final MisClock CLOCK = new MisClock();
+    private static final LocalDate TODAY = CLOCK.today();
 
     private static final PatientIdentity ANY =
             new PatientIdentity(1L, "smirnova", "Смирнова", "Ольга", "Викторовна",
@@ -53,9 +60,8 @@ class IdentityRetryTest {
         when(parser.parse(anyString())).thenReturn(new ParsedCommand("BOOK", "Стоматолог",
                 List.of(), List.of(), false, false, false, "", "test"));
 
-        // Используем РЕАЛЬНЫЙ MisClock
-        MisClock clock = new MisClock();
-        slots = new SlotResolver(mock(ScheduleProvider.class), mock(AppointmentRepository.class), clock);
+        // SlotResolver — mock целиком (см. комментарий в BookingFlowTest)
+        slots = mock(SlotResolver.class);
 
         when(slots.specialtyStaffed(anyString())).thenReturn(true);
         when(slots.offerSlots(anyString(), any(), any(), org.mockito.ArgumentMatchers.anyInt()))
@@ -63,7 +69,7 @@ class IdentityRetryTest {
         when(appointments.listFor(anyString(), any(Boolean.class))).thenReturn(List.of());
         when(appointments.book(anyString(), any(), any(), anyString()))
                 .thenReturn(java.util.Map.of("id", 1L, "doctorName", "Смирнов Алексей Викторович",
-                        "specialty", "Стоматолог", "date", LocalDate.now().plusDays(1).toString(),
+                        "specialty", "Стоматолог", "date", TODAY.plusDays(1).toString(),
                         "time", "11:00", "status", "CONFIRMED"));
 
         when(identity.findByLogin(anyString())).thenReturn(Optional.of(ANY));
@@ -82,7 +88,7 @@ class IdentityRetryTest {
     private List<SlotResolver.Slot> testSlots() {
         List<SlotResolver.Slot> list = new ArrayList<>();
         list.add(new SlotResolver.Slot(new ScheduleEntry(3L, "Смирнов Алексей Викторович",
-                "Стоматолог", LocalDate.now().plusDays(1), "09:00", 201)));
+                "Стоматолог", TODAY.plusDays(1), "09:00", 201)));
         return list;
     }
 
