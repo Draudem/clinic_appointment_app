@@ -83,6 +83,9 @@ public class ExcelScheduleProvider implements ScheduleProvider {
         if (!Files.isReadable(file)) {
             return new Health(false, name(), 0, "Файл не найден: " + file.toAbsolutePath());
         }
+        // НЕ читаем Excel целиком: entries() разворачивает 42k строк, POI держит
+        // их в памяти (~1.5 ГБ heap). На VPS с -Xmx2g это лишний риск OOM,
+        // а Health нужен только для лога при старте.
         return new Health(true, name(), -1, null);   // -1 = «не считали»
     }
 

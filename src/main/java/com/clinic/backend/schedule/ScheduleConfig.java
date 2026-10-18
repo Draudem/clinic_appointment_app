@@ -39,10 +39,8 @@ public class ScheduleConfig {
         ScheduleProvider.Health health = provider.health();
         if (health.readable()) {
             log.info("Источник расписания: {} ({})", provider.name(),
-                    health.entries() > 0 ? "строки читаются" : "пока пусто");
+                    health.entries() > 0 ? health.entries() + " строк" : "ленивая загрузка");
         } else {
-            // Не роняем старт: сценарий должен уметь сказать «перевожу на оператора»,
-            // а не падать. Проблема видна в /api/voice/parser и в логах.
             log.error("Источник расписания {} недоступен: {}", provider.name(), health.error());
         }
         return provider;
