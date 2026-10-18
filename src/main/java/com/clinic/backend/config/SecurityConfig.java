@@ -33,11 +33,10 @@ public class SecurityConfig {
      *
      * <p>Раньше здесь стоял PlainTextPasswordEncoder: пароли лежали в БД открытым
      * текстом, и любой дамп базы раскрывал учётные данные пациентов. Это прямое
-     * нарушение требований к ИСПДн (ПП № 1119, приказ ФСТЭК № 21) — даже при том,
-     * что в API пароль не отдаётся.
+     * нарушение требований к ИСПДн (ПП № 1119, приказ ФСТЭК № 21).
      *
-     * <p>Миграция: существующие записи (admin/admin123, демо-пациенты) хешируются
-     * при первом старте скриптом DataSeeder — см. PasswordMigration.
+     * <p>Миграция существующих plaintext-паролей — SQL-скрипт в README, раздел
+     * «Демо-пациенты».
      */
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -54,16 +53,17 @@ public class SecurityConfig {
                         // публичные
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login").permitAll()
                         .requestMatchers("/api/health", "/error").permitAll()
-                        // Swagger UI / OpenAPI — страница со всеми эндпоинтами
-                        .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
+                        // Swagger UI / OpenAPI и корень — для демо организаторов:
+                        // http://<host>:8000/ сразу открывает Swagger UI, по которому
+                        // проверяющий сам вызывает /api/voice/command.
+                        .requestMatchers("/", "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         // ВАЖНО: /api/stt/public/** раньше был permitAll — это транскрипты
                         // разговоров с пациентами, то есть персональные данные (152-ФЗ).
                         // Теперь под JWT. Для наладки телефонии есть флаг STT_PUBLIC_READ:
                         // при true контроллер сам отдаёт данные, но security его всё равно
-                        // не пустит — так безопаснее (двойная защита).
+                        // не пустит — двойная защита.
                         .requestMatchers("/api/stt/public/**").authenticated()
                         // всё остальное — только с валидным JWT
-                        //.requestMatchers(HttpMethod.POST, "/api/nlu/parse", "/api/nlu/status").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e
                         .authenticationEntryPoint((request, response, ex) -> {

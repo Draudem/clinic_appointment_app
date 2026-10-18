@@ -49,19 +49,19 @@ export JWT_SECRET=<≥32 символа>
 
 # 4. Запустить локально (без Docker)
 ./gradlew bootRun
-# http://localhost:8080/api/health
+# http://localhost:8000/api/health
 
 # 5. Проверить, что живо
-curl -s http://localhost:8080/api/health
+curl -s http://localhost:8000/api/health
 # {"status":"UP"}
 ```
 
-Swagger UI: <http://localhost:8080/swagger-ui/index.html>
-OpenAPI: <http://localhost:8080/v3/api-docs>
+Swagger UI: <http://localhost:8000/swagger-ui/index.html>
+OpenAPI: <http://localhost:8000/v3/api-docs>
 
-> **Про порты.** Локальный запуск (`./gradlew bootRun`) — **8080**. Docker-стек
+> **Про порты.** Локальный запуск (`./gradlew bootRun`) — **8000**. Docker-стек
 > (`deploy/docker-compose.yml`) маппит наружу **8090** (`SERVER_PORT=8090` внутри
-> контейнера). В примерах ниже используется **8080**; для Docker замените на **8090**.
+> контейнера). В примерах ниже используется **8000**; для Docker замените на **8090**.
 
 ---
 
@@ -112,7 +112,7 @@ NLU_MODEL_URL=https://... NLU_TOKENIZER_URL=https://... ./deploy/fetch-models.sh
 **Локально (без Docker):**
 ```bash
 ./gradlew bootRun
-# http://localhost:8080/api/health
+# http://localhost:8000/api/health
 ```
 
 **Через IDEA Run Configuration:** Environment Variables — те же, что в п.2 (обязательно
@@ -188,7 +188,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 ```bash
 # 1. Логин (демо-пациент из DataSeeder)
-TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"login":"smirnova","password":"smirnova"}' | jq -r .token)
 echo "TOKEN=[$TOKEN]"
@@ -197,7 +197,7 @@ echo "TOKEN=[$TOKEN]"
 **Ответ (этап PENDING_CONFIRMATION — просим подтвердить):**
 
 ```bash
-RESP1=$(curl -s -X POST http://localhost:8080/api/voice/command \
+RESP1=$(curl -s -X POST http://localhost:8000/api/voice/command \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"text":"запишите к стоматологу"}')
 SID=$(echo "$RESP1" | jq -r .sessionId)
@@ -235,7 +235,7 @@ echo "$RESP1" | jq
 **Подтверждение:**
 
 ```bash
-curl -s -X POST http://localhost:8080/api/voice/answer \
+curl -s -X POST http://localhost:8000/api/voice/answer \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"sessionId\":$SID,\"text\":\"да\"}" | jq
 ```
@@ -387,7 +387,7 @@ curl -s -X POST http://localhost:8080/api/voice/answer \
 ### Проверка NLU-модели
 
 ```bash
-curl -s -X POST http://localhost:8080/api/nlu/parse \
+curl -s -X POST http://localhost:8000/api/nlu/parse \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"text":"запишите к стоматологу завтра утром"}' | jq
@@ -409,14 +409,14 @@ curl -s -X POST http://localhost:8080/api/nlu/parse \
 ### Проверка расписания
 
 ```bash
-curl -s "http://localhost:8080/api/schedule?date=2026-10-19" \
+curl -s "http://localhost:8000/api/schedule?date=2026-10-19" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Проверка МИС
 
 ```bash
-curl -s http://localhost:8080/api/voice/parser \
+curl -s http://localhost:8000/api/voice/parser \
   -H "Authorization: Bearer $TOKEN" | jq
 # {"parser":"nlu",...,"misAvailable":true,"misClient":"RestMisClient"}
 ```
