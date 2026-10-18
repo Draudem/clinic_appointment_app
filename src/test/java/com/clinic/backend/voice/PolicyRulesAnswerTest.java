@@ -27,7 +27,7 @@ class PolicyRulesAnswerTest {
     @DisplayName("звонок #25: «верно нет» — это отказ, а не согласие")
     void realCallRefusal() {
         assertEquals(PolicyRules.Answer.NO,
-                PolicyRules.answer("понял в пятницу шестнадцатого октября в девять верно нет"));
+                PolicyRules.answer("поняла в пятницу шестнадцатого октября в девять верно нет"));
     }
 
     @Test

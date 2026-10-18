@@ -80,9 +80,10 @@ public class ExcelScheduleProvider implements ScheduleProvider {
 
     @Override
     public Health health() {
-        List<ScheduleEntry> rows = entries();
-        String err = lastError;
-        return new Health(err == null, name(), rows.size(), err);
+        if (!Files.isReadable(file)) {
+            return new Health(false, name(), 0, "Файл не найден: " + file.toAbsolutePath());
+        }
+        return new Health(true, name(), -1, null);   // -1 = «не считали»
     }
 
     private List<ScheduleEntry> entries() {

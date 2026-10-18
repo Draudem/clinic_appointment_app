@@ -331,7 +331,7 @@ public class BookingFlow {
             Turn.Slot another = pickSlot(offered, text);
             if (another != null) {
                 session.clearPending();
-                return toConfirm(session, "Понял. ", another);
+                return toConfirm(session, "Поняла. ", another);
             }
             if ("BOOK".equals(session.getPendingAction()) && session.getSpecialty() != null) {
                 LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
@@ -339,7 +339,7 @@ public class BookingFlow {
                 Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
                 if (other.isPresent()) {
                     session.clearPending();
-                    return toConfirm(session, "Понял. ", other.get());
+                    return toConfirm(session, "Поняла. ", other.get());
                 }
             }
             String reply = "Подтвердите, пожалуйста: " + session.getPendingSummary() + ". Ответьте «да» или «нет».";
