@@ -21,15 +21,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Реальная интеграция со стендом «Регистратура» через HTTP.
- *
- * <p>Логи маскируют персональные данные (152-ФЗ): ФИО в теле запроса не выводится
- * целиком, только «Смирнова О.В.». Идентификаторы (client_id, doctor_id, visit_id)
- * не персональные и логируются как есть — по ним же идёт разбор инцидентов.
- *
- * <p>Обработка 429: если стенд присылает {@code Retry-After}, клиент делает
- * до {@code props.getRetryOn429()} повторов с паузой {@code min(Retry-After, maxWait)}.
- * Это правильнее, чем сразу уходить к оператору: 429 — временное ограничение,
- * а не отказ. Политика настраивается без пересборки.
  */
 public class RestMisClient implements MisClient {
 
@@ -104,8 +95,47 @@ public class RestMisClient implements MisClient {
     }
 
     /**
+     * Ищет ID врача на стенде по его ФИО.
+     * Стенд и наш Excel имеют разные нумерации, поэтому искать нужно по имени.
+     */
+    public Long findDoctorIdByFio(String fio) {
+        if (fio == null || fio.isBlank()) return null;
+        try {
+            HttpResponse<String> res = send("GET", "/doctors?limit=50", null);
+            String body = res.body();
+
+            int fioIndex = body.indexOf("\"" + fio + "\"");
+            if (fioIndex == -1) {
+                log.warn("МИС: врач с ФИО '{}' не найден на стенде!", fio);
+                return null;
+            }
+
+            int start = Math.max(0, fioIndex - 100);
+            String prefix = body.substring(start, fioIndex);
+            int idIndex = prefix.lastIndexOf("\"id\":");
+            if (idIndex != -1) {
+                String idStr = prefix.substring(idIndex + 5).replaceAll("[^0-9].*", "");
+                if (!idStr.isEmpty()) {
+                    return Long.parseLong(idStr);
+                }
+            }
+        } catch (Exception e) {
+            log.error("МИС: ошибка поиска ID врача по ФИО '{}': {}", fio, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Получает список активных записей пациента из МИС.
+     */
+    public String getActiveVisits(Long clientId) {
+        log.info("МИС: GET /visits?client_id={}&status=Запланирована", clientId);
+        HttpResponse<String> res = send("GET", "/visits?client_id=" + clientId + "&status=Запланирована", null);
+        return res.body();
+    }
+
+    /**
      * Пример запроса списка с пагинацией (лимит 50 — требование стенда).
-     * В реальном коде используется для кэширования справочника.
      */
     public String fetchDoctorsPage(int offset) {
         log.info("МИС: GET /doctors?limit=50&offset={}", offset);
@@ -190,11 +220,6 @@ public class RestMisClient implements MisClient {
         throw new MisUnavailableException(msg);
     }
 
-    /**
-     * Разбирает {@code Retry-After}. По RFC 7231 бывает в двух формах:
-     * секунды ({@code "6"}) или HTTP-дата ({@code "Wed, 21 Oct 2026 07:28:00 GMT"}).
-     * Стенд присылает секунды, но на всякий случай поддерживаем обе.
-     */
     static long parseRetryAfter(HttpResponse<String> res) {
         String value = res.headers().firstValue("Retry-After").orElse(null);
         if (value == null || value.isBlank()) {
@@ -238,9 +263,6 @@ public class RestMisClient implements MisClient {
         }
     }
 
-    /**
-     * Маскирует ФИО для логов: «Смирнова Ольга Викторовна» → «Смирнова О.».
-     */
     static String mask(String last, String first) {
         StringBuilder sb = new StringBuilder();
         if (last != null && !last.isBlank()) sb.append(last.trim());

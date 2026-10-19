@@ -20,36 +20,21 @@ public class DialogueSession {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    /**
-     * Логин пациента. Пустая строка — «ещё не установлен»: по телефону
-     * аутентификации нет, логин появляется только после идентификации по ФИО.
-     */
     @Column(nullable = false, length = 50)
     private String patientLogin;
 
-    /**
-     * Ключ телефонного звонка (UUID от Asterisk). По нему сессия находится
-     * между репликами, поэтому она переживает паузы и переподключение.
-     */
     @Column(name = "call_key", length = 60)
     private String callKey;
 
-    /** Номер звонящего (ANI) — дополнительный признак при идентификации. */
     @Column(name = "caller_phone", length = 30)
     private String callerPhone;
 
-    /** Момент последней реплики пациента — для отсчёта тишины (R-17). */
     @Column
     private Instant lastSpeechAt = Instant.now();
 
     @Column(nullable = false)
     private int exchanges;
 
-    /**
-     * Этап сценария С-01:
-     * IDENTITY | SPECIALTY | OFFER | PENDING_CONFIRMATION | CONFIRMED |
-     * RESCHEDULE | OPERATOR
-     */
     @Column(nullable = false, length = 30)
     private String stage;
 
@@ -64,6 +49,10 @@ public class DialogueSession {
     private String pendingAction;      // BOOK | RESCHEDULE
 
     private Long pendingDoctorId;
+
+    /** ФИО врача, нужно для маппинга ID из Excel на ID стенда МИС. */
+    @Column(length = 160)
+    private String pendingDoctorFio;
 
     @Column(length = 10)
     private String pendingDate;        // YYYY-MM-DD
@@ -86,79 +75,39 @@ public class DialogueSession {
     @Column(length = 10)
     private String patientBirthDate;
 
-    /** Ответ пациента на вопрос «вы уже записаны?» — ведёт в С-03 или обратно в С-01. */
     @Column(length = 20)
     private String dupDecision;
 
-    // --- Предложенные слоты, чтобы «второй»/«в пятницу» что-то значили ---
+    // --- Предложенные слоты ---
 
-    /** Слоты текущего предложения в компактном виде: doctorId|date|time|cabinet через запятую. */
     @Column(length = 512)
     private String offeredSlots;
 
-    /** Пожелание пациента по дате, сохранённое до подбора слота. */
     @Column(length = 10)
     private String wantedDate;
 
-    /** Пожелание пациента по времени, сохранённое до подбора слота. */
     @Column(length = 5)
     private String wantedTime;
 
     // --- Счётчики ---
-    /**
-     * Сколько раз ассистент не понял пациента подряд (лестница R-05).
-     *
-     * DEFAULT в columnDefinition обязателен: без него Hibernate пытается добавить
-     * NOT NULL-колонку в таблицу, где уже есть строки, и миграция падает на живых базах.
-     */
     @Column(nullable = false, columnDefinition = "integer default 0")
     private int missCount;
 
-    /**
-     * ФИО, которое пациент уже назвал в этом звонке.
-     *
-     * <p>Раньше {@code onIdentity} разбирала только текущую реплику, поэтому
-     * названное терялось между ходами: пациент давал ФИО, потом дату рождения,
-     * и на дату ассистент отвечал «Назовите фамилию» — её он только что назвал.
-     * Теперь недостающее складывается из того, что уже сказано.
-     */
     @Column(length = 255)
     private String saidFio;
 
-    /** Дата рождения, названная пациентом, в формате ISO. */
     @Column(length = 10)
     private String saidBirthDate;
 
-    /**
-     * Сколько раз пациента не нашли. На второй попытке — перевод оператору.
-     *
-     * <p>Раньше счётчик неудач обнулялся на каждом ходу, и регламентная
-     * лестница Р-05 не срабатывала никогда: ассистент мог бесконечно
-     * повторять «Не получается найти вас в базе».
-     */
     @Column(nullable = false, columnDefinition = "integer default 0")
     private int identityMisses;
 
-    /** Пациент отказался от записи разговора (3.4). */
     @Column(nullable = false, columnDefinition = "boolean default false")
     private boolean recordingOptOut;
 
-    /**
-     * Стенограмма разговора.
-     *
-     * Раньше здесь стоял @Lob вместе с columnDefinition="text": Hibernate читал
-     * значение как large object (oid), а колонка была text — чтение падало с
-     * «Unable to access lob stream», и GET /api/voice/sessions отдавал 500.
-     * Для text Lob не нужен, поэтому убираем.
-     *
-     * Данные пациентов: по разделу 8 регламента стенограммы хранятся не более
-     * 90 дней и доступны по ролям. Поле {@code expiresAt} позволяет чистить их
-     * по расписанию, не разбирая содержимое.
-     */
     @Column(columnDefinition = "text")
     private String transcript;
 
-    /** Когда стенограмму пора удалить (90 дней с момента записи). */
     @Column
     private Instant expiresAt;
 
@@ -188,13 +137,11 @@ public class DialogueSession {
         this.updatedAt = Instant.now();
     }
 
-    /** Считаем ТОЛЬКО реплики пациента (обмен = ответ пользователя). */
     public void incrementExchanges() {
         this.exchanges++;
         this.updatedAt = Instant.now();
     }
 
-    /** Сброс счётчика при начале нового звонка. */
     public void setExchanges(int exchanges) {
         this.exchanges = exchanges;
         this.updatedAt = Instant.now();
@@ -203,6 +150,7 @@ public class DialogueSession {
     public void clearPending() {
         this.pendingAction = null;
         this.pendingDoctorId = null;
+        this.pendingDoctorFio = null; // Очищаем ФИО
         this.pendingDate = null;
         this.pendingTime = null;
         this.pendingCabinet = null;
@@ -242,7 +190,6 @@ public class DialogueSession {
         this.updatedAt = Instant.now();
     }
 
-    /** Сколько секунд прошло с последней реплики пациента. */
     public long silentSeconds() {
         return Duration.between(lastSpeechAt, Instant.now()).getSeconds();
     }
@@ -298,6 +245,14 @@ public class DialogueSession {
 
     public void setPendingDoctorId(Long pendingDoctorId) {
         this.pendingDoctorId = pendingDoctorId;
+    }
+
+    public String getPendingDoctorFio() {
+        return pendingDoctorFio;
+    }
+
+    public void setPendingDoctorFio(String pendingDoctorFio) {
+        this.pendingDoctorFio = pendingDoctorFio;
     }
 
     public String getPendingDate() {
@@ -424,7 +379,6 @@ public class DialogueSession {
         this.identityMisses = identityMisses;
     }
 
-    /** Новый звонок — всё, что было названо, забываем. */
     public void resetIdentity() {
         this.saidFio = null;
         this.saidBirthDate = null;
@@ -445,25 +399,19 @@ public class DialogueSession {
 
     /**
      * Полный сброс к началу нового звонка.
-     *
-     * Заодно забывается ЛИЧНОСТЬ: иначе следующий звонок того же транка начинал бы
-     * с уже найденного пациента, и ассистент обращался бы по имени тому, кто его не называл.
      */
     public void resetForNewCall() {
         this.stage = "SPECIALTY";
         this.specialty = null;
-        // patientLogin в БД NOT NULL: телефонный звонок не аутентифицирован,
-        // поэтому «не найден» храним пустой строкой, а не null
         this.patientLogin = "";
         this.patientFio = null;
         this.patientBirthDate = null;
-        // то, что пациент успел назвать в ПРОШЛОМ звонке, к новому отношения
-        // не имеет: иначе «Петров» из вчерашнего разговора опознался бы сегодня
         this.saidFio = null;
         this.saidBirthDate = null;
         this.identityMisses = 0;
         this.pendingAction = null;
         this.pendingDoctorId = null;
+        this.pendingDoctorFio = null; // Очищаем ФИО
         this.pendingDate = null;
         this.pendingTime = null;
         this.pendingCabinet = null;
@@ -482,7 +430,6 @@ public class DialogueSession {
         this.updatedAt = Instant.now();
     }
 
-    /** Очистить стенограмму — например, при начале нового звонка. */
     public void setTranscript(String transcript) {
         this.transcript = transcript;
         this.updatedAt = Instant.now();

@@ -42,6 +42,11 @@ public class NluCommandParser implements CommandParser {
         }
 
         String intent = frame.intent();
+
+        String q = ClinicalKnowledgeBase.normalize(text);
+        if (q.contains("перенес") || q.contains("перезапиш") || q.contains("поменяй") || q.contains("сдвин")) {
+            intent = "RESCHEDULE";
+        }
         boolean unsupported = frame.unsupported();
 
         // --- предохранитель намерения ------------------------------------

@@ -73,13 +73,11 @@ public class BookingFlow {
             if (verdict.decision() == PolicyRules.Decision.TRANSFER) {
                 session.setHandedOff(true);
                 session.setStage("OPERATOR");
-            } else {
-                session.setStage("CONFIRMED");
-            }
-            session.append("ассистент", verdict.reply());
-            if (verdict.decision() == PolicyRules.Decision.TRANSFER) {
+                session.append("ассистент", verdict.reply());
                 return Turn.transferWithReason(verdict.reply(), verdict.rule(), verdict.resultCode(), 0, "RED_FLAG_OR_POLICY");
             } else {
+                session.setStage("CONFIRMED");
+                session.append("ассистент", verdict.reply());
                 return Turn.hangup(verdict.reply(), session.getStage(), verdict.resultCode(), 0);
             }
         }
@@ -150,6 +148,11 @@ public class BookingFlow {
         ParsedCommand parsed = parser.parse(text);
         session.setPendingFrame(parsed.frame());
 
+        // ПРОВЕРКА: если пациент хочет перенести запись (С-03)
+        if ("RESCHEDULE".equals(parsed.intent())) {
+            return startReschedule(session, who, parsed);
+        }
+
         String specialty = parsed.hasSpecialty() ? parsed.specialty() : session.getSpecialty();
         if (specialty == null || specialty.isBlank()) {
             String reply = "К какому врачу хотите записаться? Назовите специальность или скажите, что беспокоит.";
@@ -171,6 +174,74 @@ public class BookingFlow {
         rememberTime(session, parsed, text);
         Optional<Turn.Slot> exact = findExact(session, specialty, parsed, text);
         return afterSpecialty(session, who, exact.orElse(null));
+    }
+
+    /**
+     * Начало сценария переноса (С-03).
+     * Проверяем, есть ли у пациента активные записи. Если есть — предлагаем перенести.
+     */
+    private Turn startReschedule(DialogueSession session, PatientIdentity who, ParsedCommand parsed) {
+        if (!who.identified()) {
+            String reply = "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.";
+            session.setStage("IDENTITY");
+            session.append("ассистент", reply);
+            session.setPendingAction("RESCHEDULE_INTENT");
+            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+        }
+
+        try {
+            // Идем в МИС, чтобы найти клиента и его активные записи
+            MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
+
+            String visitsJson = "";
+            if (misClient instanceof RestMisClient restClient) {
+                visitsJson = restClient.getActiveVisits(misPatient.id());
+            }
+
+            // Если записей нет (пустой JSON-массив "[]")
+            if (visitsJson.trim().equals("[]") || visitsJson.isBlank()) {
+                String reply = "Активных записей не найдено. Хотите записаться?";
+                session.setStage("SPECIALTY");
+                session.append("ассистент", reply);
+                return Turn.continueWith(reply, "SPECIALTY", List.of(), 0);
+            }
+
+            // Если записи есть, берем первую для примера (в идеале, если их несколько, нужно предложить выбор)
+            // Для простоты берем ID записи из JSON (ищем "id":)
+            Long visitId = null;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"id\":\\s*(\\d+)").matcher(visitsJson);
+            if (m.find()) {
+                visitId = Long.parseLong(m.group(1));
+            }
+
+            // Вытаскиваем ФИО врача и время из JSON
+            String doctorName = "врачу";
+            java.util.regex.Matcher dm = java.util.regex.Pattern.compile("\"full_name\":\\s*\"([^\"]+)\"").matcher(visitsJson);
+            if (dm.find()) doctorName = dm.group(1);
+
+            String timeStr = "назначенное время";
+            java.util.regex.Matcher tm = java.util.regex.Pattern.compile("\"scheduled_at\":\\s*\"([^\"]+)\"").matcher(visitsJson);
+            if (tm.find()) timeStr = tm.group(1);
+
+            session.setPendingAppointmentId(visitId);
+            session.setPendingAction("RESCHEDULE");
+            session.setSpecialty(null); // Специальность уточним позже
+
+            LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
+            TimeResolver.TimePreference pref = from(session);
+            if (!pref.isEmpty()) {
+                return offerReschedule(session);
+            }
+
+            session.setStage("RESCHEDULE");
+            String reply = "У вас есть запись к " + doctorName + " на " + timeStr + ". Назовите, на когда её перенести?";
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);
+
+        } catch (Exception e) {
+            log.error("Ошибка при поиске записей в МИС: {}", e.getMessage());
+            return transfer(session, "Не получается проверить записи. Соединяю с регистратором.", "R-06");
+        }
     }
 
     private void rememberTime(DialogueSession session, ParsedCommand parsed, String text) {
@@ -317,6 +388,7 @@ public class BookingFlow {
     private void preparePending(DialogueSession session, Turn.Slot picked) {
         session.setPendingAction("BOOK");
         session.setPendingDoctorId(picked.doctorId());
+        session.setPendingDoctorFio(picked.fio()); // Сохраняем ФИО для маппинга в МИС
         session.setPendingDate(picked.date().toString());
         session.setPendingTime(picked.time());
         session.setPendingCabinet(picked.cabinet());
@@ -378,11 +450,19 @@ public class BookingFlow {
             String dateStr = d.format(DATE_FMT);
             String scheduledAt = dateStr + " " + session.getPendingTime();
 
-            MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
+            // ВАЖНО: ID врачей в Excel и на стенде МИС НЕ СОВПАДАЮТ.
+            // Находим ID врача на стенде по его ФИО.
+            Long realDoctorId = session.getPendingDoctorId();
+            if (misClient instanceof RestMisClient restClient && session.getPendingDoctorFio() != null) {
+                Long foundId = restClient.findDoctorIdByFio(session.getPendingDoctorFio());
+                if (foundId != null) {
+                    realDoctorId = foundId;
+                }
+            }
+
+            MisVisit visit = misClient.createVisit(misPatient.id(), realDoctorId, scheduledAt);
 
             Integer cabinet = session.getPendingCabinet();
-            // scheduledAt приходит из МИС в формате ДД.ММ.ГГГГ ЧЧ:ММ — парсим общим парсером,
-            // а не LocalDate.parse (тот ждёт ISO и падал бы на живом стенде)
             String reply = "Готово, вы записаны. " + spokenDate(visit.scheduledAt(), "")
                     + ", " + visit.doctor().fullName()
                     + (cabinet == null ? "" : ", кабинет " + RussianTime.number(cabinet))
@@ -406,12 +486,9 @@ public class BookingFlow {
             log.warn("МИС: 429 при записи/переносе (Retry-After={} с): {}",
                     e.retryAfterSeconds(), e.getMessage());
             session.clearPending();
-            // Не «система недоступна», а «секунду подождите»: запись не потеряна,
-            // просто МИС просит сбавить темп. Пациенту честнее сказать именно так.
             return transfer(session,
                     "Секунду, проверяю расписание ещё раз. Соединяю с регистратором — он запишет без задержки.",
                     "R-06");
-
 
         } catch (MisUnavailableException e) {
             log.error("МИС недоступна при создании записи: {}", e.getMessage());
@@ -493,6 +570,7 @@ public class BookingFlow {
     private Turn toRescheduleConfirm(DialogueSession session, Turn.Slot picked) {
         session.setPendingAction("RESCHEDULE");
         session.setPendingDoctorId(picked.doctorId());
+        session.setPendingDoctorFio(picked.fio());
         session.setPendingDate(picked.date().toString());
         session.setPendingTime(picked.time());
         session.setPendingCabinet(picked.cabinet());
@@ -540,7 +618,15 @@ public class BookingFlow {
             String dateStr = d.format(DATE_FMT);
             String scheduledAt = dateStr + " " + session.getPendingTime();
 
-            MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
+            Long realDoctorId = session.getPendingDoctorId();
+            if (misClient instanceof RestMisClient restClient && session.getPendingDoctorFio() != null) {
+                Long foundId = restClient.findDoctorIdByFio(session.getPendingDoctorFio());
+                if (foundId != null) {
+                    realDoctorId = foundId;
+                }
+            }
+
+            MisVisit visit = misClient.createVisit(misPatient.id(), realDoctorId, scheduledAt);
 
             try {
                 misClient.cancelVisit(oldId);
@@ -570,12 +656,9 @@ public class BookingFlow {
             log.warn("МИС: 429 при записи/переносе (Retry-After={} с): {}",
                     e.retryAfterSeconds(), e.getMessage());
             session.clearPending();
-            // Не «система недоступна», а «секунду подождите»: запись не потеряна,
-            // просто МИС просит сбавить темп. Пациенту честнее сказать именно так.
             return transfer(session,
                     "Секунду, проверяю расписание ещё раз. Соединяю с регистратором — он запишет без задержки.",
                     "R-06");
-
 
         } catch (MisUnavailableException e) {
             log.error("МИС недоступна при переносе: {}", e.getMessage());
@@ -642,6 +725,13 @@ public class BookingFlow {
 
     private Turn continueScenario(DialogueSession session, PatientIdentity p) {
         LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
+
+        // ЕСЛИ мы сюда попали из сценария переноса — продолжаем его
+        if ("RESCHEDULE_INTENT".equals(session.getPendingAction())) {
+            session.clearPending();
+            return startReschedule(session, p, parser.parse("перенести"));
+        }
+
         TimeResolver.TimePreference pref = from(session);
         String greeting = p.addressName().isBlank() ? "" : "Спасибо, " + p.addressName() + ". ";
 
@@ -685,15 +775,16 @@ public class BookingFlow {
                 }
             });
         }
+
         String reason = switch (rule) {
-            case "R-01" -> "RED_FLAG_EMERGENCY"; // 103/112
-            case "R-02" -> "OPERATOR_REQUEST";   // попросил человека
-            case "R-03" -> "COMPLAINT";          // жалоба
-            case "R-04" -> "MEDICAL_QUESTION";   // мед. вопрос
-            case "R-05" -> "MAX_MISUNDERSTANDING"; // не понял 3 раза
-            case "R-06" -> "MIS_UNAVAILABLE";    // система упала
-            case "R-07" -> "IDENTIFICATION_FAILED"; // не нашли в базе
-            case "R-11" -> "RED_FLAG_ACUTE";     // острое состояние
+            case "R-01" -> "RED_FLAG_EMERGENCY";
+            case "R-02" -> "OPERATOR_REQUEST";
+            case "R-03" -> "COMPLAINT";
+            case "R-04" -> "MEDICAL_QUESTION";
+            case "R-05" -> "MAX_MISUNDERSTANDING";
+            case "R-06" -> "MIS_UNAVAILABLE";
+            case "R-07" -> "IDENTIFICATION_FAILED";
+            case "R-11" -> "RED_FLAG_ACUTE";
             default -> "UNKNOWN";
         };
         return Turn.transferWithReason(reply, rule, "ESCALATED", session.getMissCount(), reason);
@@ -703,16 +794,6 @@ public class BookingFlow {
         return new Turn.Slot(s.doctorId(), s.fio(), s.specialty(), s.date(), s.time(), s.cabinet());
     }
 
-    /**
-     * Разбирает дату/время из МИС и из локальной БД в один формат.
-     *
-     * <p>МИС возвращает {@code scheduledAt} строкой {@code ДД.ММ.ГГГГ ЧЧ:ММ} (документация
-     * стенда), а из БД приходит ISO-дата {@code YYYY-MM-DD}. Раньше здесь стоял
-     * {@code LocalDate.parse(String.valueOf(date))}, и на реальном ответе МИС
-     * «16.10.2026 11:00» он падал с DateTimeParseException — то есть запись в МИС
-     * создавалась, а ответ пациенту не формировался, и звонок обрывался.
-     * Теперь оба формата разбираются явно.
-     */
     static String spokenDate(Object date, Object time) {
         if (date == null) return "";
         LocalDate d = parseAnyDate(String.valueOf(date));
@@ -721,24 +802,20 @@ public class BookingFlow {
         return t == null ? RussianTime.sayDate(d) : RussianTime.sayDateTime(d, t);
     }
 
-    /** Разбирает дату в ISO ({@code 2026-10-16}) или в {@code ДД.ММ.ГГГГ [ЧЧ:ММ]}. */
     private static LocalDate parseAnyDate(String raw) {
         if (raw == null || raw.isBlank()) return null;
         String s = raw.trim();
         try {
-            return LocalDate.parse(s);                       // ISO
+            return LocalDate.parse(s);
         } catch (DateTimeParseException ignored) {
-            // не ISO
         }
         try {
-            return LocalDate.parse(s, DATE_FMT);             // ДД.ММ.ГГГГ
+            return LocalDate.parse(s, DATE_FMT);
         } catch (DateTimeParseException ignored) {
-            // не дата-only
         }
         try {
-            return LocalDateTime.parse(s, DATETIME_FMT).toLocalDate();   // ДД.ММ.ГГГГ ЧЧ:ММ
+            return LocalDateTime.parse(s, DATETIME_FMT).toLocalDate();
         } catch (DateTimeParseException ignored) {
-            // не наш формат
         }
         log.warn("Не удалось разобрать дату из ответа МИС: «{}»", raw);
         return null;
