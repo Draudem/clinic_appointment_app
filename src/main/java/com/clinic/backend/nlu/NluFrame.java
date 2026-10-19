@@ -27,6 +27,7 @@ public record NluFrame(
             return unsupportedFrame();
         }
         boolean unsupported = list.contains("<UNSUPPORTED>");
+
         String intent = null;
         for (String t : list) {
             if (FrameVocab.INTENTS.contains(t)) {
@@ -34,6 +35,7 @@ public record NluFrame(
                 break;
             }
         }
+
         String specialty = null;
         for (String t : list) {
             if (FrameVocab.SPECIALTIES.contains(t)) {
@@ -41,6 +43,7 @@ public record NluFrame(
                 break;
             }
         }
+
         List<String> timeFactors = new java.util.ArrayList<>();
         boolean inTime = false;
         for (String t : list) {
@@ -56,11 +59,13 @@ public record NluFrame(
                 timeFactors.add(t);
             }
         }
+
         boolean timeUnknown = list.contains("<T_UNKNOWN>");
         List<String> symptoms = list.stream()
                 .filter(t -> t.startsWith("<SYMPTOM_"))
                 .toList();
         boolean needsClarification = list.contains("<NEEDS_CLARIFICATION>");
+
         return new NluFrame(tokens, intent, specialty, timeFactors, timeUnknown,
                 symptoms, needsClarification, unsupported);
     }

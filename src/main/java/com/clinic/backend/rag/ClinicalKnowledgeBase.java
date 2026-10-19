@@ -39,6 +39,7 @@ public class ClinicalKnowledgeBase {
     /** Токен NLU-модели -> название специальности в БД. */
     public static final Map<String, String> NLU_TOKEN_TO_SPECIALTY = Map.ofEntries(
             Map.entry("GP", "Терапевт"),
+            Map.entry("PEDIATRICIAN", "Педиатр"),
             Map.entry("DENTIST", "Стоматолог"),
             Map.entry("DERMATOLOGIST", "Дерматолог"),
             Map.entry("GYNECOLOGIST", "Гинеколог"),
@@ -46,7 +47,12 @@ public class ClinicalKnowledgeBase {
             Map.entry("NEUROLOGIST", "Невролог"),
             Map.entry("PSYCHOLOGIST", "Психолог"),
             Map.entry("SURGEON", "Хирург"),
-            Map.entry("ENT", "ЛОР"));
+            Map.entry("CARDIOLOGIST", "Кардиолог"),
+            Map.entry("UROLOGIST", "Уролог"),
+            Map.entry("ENDOCRINOLOGIST", "Эндокринолог"),
+            Map.entry("ORTHOPEDIST", "Ортопед"),
+            Map.entry("ENT", "ЛОР")
+    );
 
     /**
      * Псевдоспециальности модели -> реальные строки doctors.specialty.
