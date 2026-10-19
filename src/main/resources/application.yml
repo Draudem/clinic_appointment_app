@@ -111,7 +111,7 @@ app:
     silence-seconds: ${STT_SILENCE_SECONDS:0.6}
     # Максимальная длина одной фразы, после неё форсируем распознавание (секунды)
     max-utterance-seconds: ${STT_MAX_UTTERANCE_SECONDS:6}
-    silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.03}
+    silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.08}
     # Отдавать ли распознанный текст обратно в сокет.
     speak-replies: ${STT_SPEAK_REPLIES:false}
 

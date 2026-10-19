@@ -39,7 +39,7 @@ class CallVoice {
      * «Хвост тишины» после окончания речи ассистента: столько миллисекунд
      * входящее аудио ещё считается эхом и игнорируется.
      */
-    private static final long ECHO_TAIL_MS = 250;
+    private static final long ECHO_TAIL_MS = 800;
 
     /** Глобальная статистика: сколько фраз реально прозвучало. */
     private static final AtomicLong SPOKEN_OK = new AtomicLong();

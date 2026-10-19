@@ -66,7 +66,9 @@ class BookingFlowTest {
         // Настройка мока МИС
         when(misClient.available()).thenReturn(true);
         when(misClient.findOrCreateClient(anyString(), anyString(), any(LocalDate.class)))
-                .thenReturn(new MisClientDto(1L, "Смирнова", "Ольга", "12.03.1978"));
+                .thenReturn(new MisClientDto(
+                        1L, "Смирнова", "Ольга", "Викторовна", "12.03.1978",
+                        null, "2026-10-17 12:00"));
         when(misClient.createVisit(any(), any(), anyString()))
                 .thenReturn(new MisVisit(99L, 1L,
                         new MisVisit.MisDoctor(3L, "Смирнов Алексей Викторович", "Стоматолог", true),
