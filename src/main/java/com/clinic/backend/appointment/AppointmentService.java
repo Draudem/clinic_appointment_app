@@ -46,20 +46,14 @@ public class AppointmentService {
                 .orElseThrow(BadCredentialsException::new);
         Doctor doctor = doctors.findById(doctorId)
                 .orElseThrow(() -> new NotFoundException("Врач не найден: " + doctorId));
-        if (!doctor.worksOn(date)) {
-            throw new ConflictException("Врач " + doctor.getFio() + " не работает " + date);
-        }
         if (time == null || time.isBlank()) {
             time = doctor.getTime();
         }
-        // Истина о том, когда врач принимает, — расписание, а не поле doctors.time.
-        // Пока расписание берётся из той же таблицы, поведение прежнее, но с
-        // переключением на Excel времена приёма начинают различаться, и проверка
-        // по doctors.time отвергала бы всё, кроме одного времени в день.
-        boolean inSchedule = schedule.exact(doctor.getFio(), date, time).isPresent();
-        if (!inSchedule && !doctor.getTime().equals(time)) {
-            throw new ConflictException("Время приёма врача: " + doctor.getTime());
-        }
+        // Ни worksOn, ни schedule.exact здесь не делаем: SlotResolver уже
+        // проверил слот через ScheduleProvider.exact(fio, date, time).
+        // doctorId из Excel (D007) не совпадает с id в сидерной doctors (Новиков),
+        // поэтому любая проверка по doctor.getFio()/doctor.getTime() здесь
+        // ломает запись к врачам из Excel.
         boolean taken = appointments
                 .findByDoctorIdAndDateAndTimeAndStatus(doctor.getId(), date, time, "CONFIRMED")
                 .isPresent();
@@ -69,7 +63,6 @@ public class AppointmentService {
         Appointment appointment = appointments.save(new Appointment(patient, doctor, date, time));
         return toDto(appointment);
     }
-
     @Transactional
     public void cancel(String userLogin, Long appointmentId, boolean isAdmin) {
         Appointment appointment = appointments.findById(appointmentId)

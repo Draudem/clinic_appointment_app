@@ -54,7 +54,14 @@ class CallVoice {
     private volatile boolean closed;
     private volatile IOException failure;
 
-    /** Пока true — ассистент физически пишет кадры в сокет. */
+    /**
+     * Пока true — ассистент физически пишет кадры в сокет.
+     *
+     * <p>Устанавливается в run() ДО speak() и сбрасывается ПОСЛЕ, а не внутри
+     * speak(). Иначе между poll() и speak() есть окно, когда queue пуст,
+     * speaking=false, и awaitFinished() возвращает true раньше времени —
+     * соединение закрывается, не дождавшись конца фразы.
+     */
     private volatile boolean speaking = false;
     /** Время последнего кадра речи ассистента (для «хвоста тишины»). */
     private volatile long lastSpokeAt = 0L;
@@ -74,12 +81,20 @@ class CallVoice {
         }
     }
 
-    /** Ждёт, пока очередь опустеет и последняя фраза дозвучит. */
+    /**
+     * Ждёт, пока очередь опустеет и последняя фраза дозвучит.
+     *
+     * <p>Проверка {@code (now - lastSpokeAt) > 200} — «эхо-хвост»: даже если
+     * speaking уже false, между последним кадром и сейчас должно пройти
+     * 200 мс, чтобы не закрыть сокет в момент, когда последний кадр ещё
+     * физически в буфере сокета.
+     */
     boolean awaitFinished(long seconds) {
         long deadline = System.currentTimeMillis() + seconds * 1000;
         while (System.currentTimeMillis() < deadline) {
-            if (queue.isEmpty() && !speaking) {
-                return true;   // очередь пуста и не говорим — всё, ответ дозвучал
+            boolean tailElapsed = (System.currentTimeMillis() - lastSpokeAt) > 200;
+            if (queue.isEmpty() && !speaking && tailElapsed) {
+                return true;
             }
             try {
                 Thread.sleep(50);
@@ -130,12 +145,24 @@ class CallVoice {
         return result;
     }
 
+    /**
+     * Поток озвучки. ГЛАВНОЕ ОТЛИЧИЕ от предыдущей версии: speaking
+     * выставляется ВОКРУГ speak(), а не внутри. Иначе между poll() и speak()
+     * есть окно, когда queue пуст, speaking=false, и awaitFinished()
+     * возвращает true — соединение закрывается, не дождавшись конца фразы.
+     */
     private void run() {
         try {
             while (!closed) {
                 String text = queue.poll(200, TimeUnit.MILLISECONDS);
                 if (text != null) {
-                    speak(text);
+                    speaking = true;                          // ← ДО speak()
+                    try {
+                        speak(text);
+                    } finally {
+                        speaking = false;                     // ← ПОСЛЕ speak()
+                        lastSpokeAt = System.currentTimeMillis();
+                    }
                 }
                 // Если очередь пуста — просто продолжаем ждать.
                 // НЕ выходим из цикла: новые фразы могут появиться позже.
@@ -147,6 +174,12 @@ class CallVoice {
         }
     }
 
+    /**
+     * Синтез одной фразы и отправка в сокет.
+     *
+     * <p>speaking НЕ трогаем: флагом управляет run(). Здесь только синтез,
+     * ресемплинг, отправка кадров. lastSpokeAt тоже выставляется в run().
+     */
     private void speak(String text) {
         float[] raw;
         try {
@@ -165,7 +198,6 @@ class CallVoice {
         float[] at8k = PcmConverter.downsample(raw, synth.sampleRate(), AUDIO_RATE);
         byte[] pcm = PcmResampler.floatToBytes(at8k);
 
-        speaking = true;   // с этого момента игнорируем микрофон
         long start = System.currentTimeMillis();
         try {
             for (int offset = 0; offset < pcm.length && !closed; offset += FRAME_BYTES) {
@@ -184,10 +216,6 @@ class CallVoice {
             SPOKEN_FAILED.incrementAndGet();
             log.warn("Озвучка прервана ошибкой записи: {}", e.getMessage());
             return;
-        } finally {
-            // Сбрасываем флаг ТОЛЬКО здесь, чтобы при исключении не «залипнуть».
-            speaking = false;
-            lastSpokeAt = System.currentTimeMillis();
         }
         SPOKEN_OK.incrementAndGet();
         // Формат собираем строкой: в SLF4J нет {:.1f}, там только {} с toString().
@@ -200,7 +228,6 @@ class CallVoice {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-
     }
 
     private void sleepFrame() {
@@ -226,8 +253,6 @@ class CallVoice {
      * (Нужно для тестов, чтобы убедиться, что мы не уронили поток ошибкой синтеза).
      */
     public boolean isAlive() {
-        // В текущей реализации поток создается в конструкторе.
-        // Если он не завершился (closed == false), значит он жив.
         return !closed;
     }
 

@@ -315,7 +315,15 @@ public class AsteriskAudioSocketServer implements Runnable {
         } catch (IOException e) {
             log.error("Звонок #{}: ошибка ввода-вывода: {}", callId, e.getMessage());
         } catch (RuntimeException e) {
-            log.error("Звонок #{}: непредвиденная ошибка разбора потока", callId, e);
+            log.error("Звонок #{}: непредвиденная ошибка, переводим на оператора", callId, e);
+            try {
+                if (voice != null) {
+                    voice.enqueue("Извините, произошла ошибка. Соединяю с сотрудником.");
+                    voice.awaitFinished(10);
+                }
+            } catch (RuntimeException ignored) {
+                // не падаем повторно
+            }
         } finally {
             if (voice != null) {
                 voice.close();

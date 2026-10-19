@@ -379,8 +379,6 @@ public class BookingFlow {
 
             MisVisit visit = misClient.createVisit(misPatient.id(), session.getPendingDoctorId(), scheduledAt);
 
-            appointments.book(login, session.getPendingDoctorId(), d, session.getPendingTime());
-
             Integer cabinet = session.getPendingCabinet();
             // scheduledAt приходит из МИС в формате ДД.ММ.ГГГГ ЧЧ:ММ — парсим общим парсером,
             // а не LocalDate.parse (тот ждёт ISO и падал бы на живом стенде)
@@ -394,8 +392,9 @@ public class BookingFlow {
             session.append("ассистент", reply);
             return Turn.hangup(reply, "CONFIRMED", "BOOKED", 0);
 
-        } catch (MisConflictException | MisBadRequestException e) {
-            log.warn("МИС отклонила запись: {}", e.getMessage());
+        } catch (com.clinic.backend.common.ConflictException
+                 | MisConflictException | MisBadRequestException e) {
+            log.warn("Запись отклонена: {}", e.getMessage());
             session.clearPending();
             session.setStage("OFFER");
             String reply = "Извините, это время только что заняли. Назовите другое время.";
