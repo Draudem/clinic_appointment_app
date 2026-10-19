@@ -1,470 +1,238 @@
-# Clinic Voice Assistant — голосовой ассистент регистратуры
+# Clinic Voice Backend
 
-# Разработано командой: Иксиканцы
+Голосовой ассистент регистратуры поликлиники: приём звонков по Asterisk AudioSocket,
+локальное распознавание речи (GigaAM), локальный синтез (Piper), NLU-модель
+(ONNX, constrained decoding), интеграция с тестовым стендом МИС «Инфоклиника».
 
-Бэкенд голосового ассистента для государственной поликлиники № 7: принимает входящие
-звонки, записывает на приём, переносит и отменяет записи, отвечает на справочные вопросы,
-переводит на оператора опасные и нестандартные обращения. Интегрируется с тестовым
-стендом МИС «Регистратура» (`crm-med-mock.dbi-testing.ru`).
-
-Соответствие 152-ФЗ.** Все модели (NLU, STT, TTS) работают **локально**, в контуре 
-заказчика. Персональные данные пациентов не передаются во внешние облачные сервисы.
-Бесплатные онлайн-сервисы распознавания речи не используются. Транскрипты и ФИО
-маскируются в логах. Отладочный эндпоинт `/api/stt/public/**` выключен по умолчанию.
+**Стек:** Java 21, Spring Boot 3.5, PostgreSQL 16, ONNX Runtime, sherpa-onnx.
+**Демо:** `http://<host>:8000/` → редирект на Swagger UI.
+**Телефонный канал:** TCP `:8091` (AudioSocket), подключается Asterisk.
 
 ---
 
-## Содержание
+## 1. Что работает (по регламенту РГ-ТЕЛ-01)
 
-1. [Быстрый старт (5 минут)](#быстрый-старт-5-минут)
-2. [Запуск с нуля (полная инструкция)](#запуск-с-нуля-полная-инструкция)
-3. [Сценарии (регламент РГ-ТЕЛ-01)](#сценарии-регламент-рг-тел-01)
-4. [Пример сессии записи (curl)](#пример-сессии-записи-curl)
-5. [Безопасность и 152-ФЗ](#безопасность-и-152-фз)
-6. [Обработка сбоев](#обработка-сбоев)
-7. [Архитектура](#архитектура)
-8. [Диагностика](#диагностика)
-9. [Известные ограничения](#известные-ограничения)
-10. [Лицензия и контакты](#лицензия-и-контакты)
+| Сценарий | Код результата | Статус | Где в коде |
+|---|---|---|---|
+| C-01 Запись на приём | `BOOKED` | **реализовано** | `BookingFlow.doBook` → `RestMisClient.createVisit` |
+| C-03 Перенос | `RESCHEDULED` | **реализовано** | `BookingFlow.doReschedule` (создать → отменить, атомарно) |
+| C-04 Отмена | `CANCELLED` | **реализовано** | `BookingFlow` + `AppointmentService.cancel` |
+| C-05 Проверка записи | `INFO_GIVEN` | **реализовано** | `BookingFlow.activeBooking` |
+| C-07 График работы | `INFO_GIVEN` | **реализовано** | `ScheduleQueryService` (С-07) |
+| C-14 Экстренная ситуация | `EMERGENCY` | **реализовано** | `PolicyRules` R-01, категории А/Б |
+| C-15 Жалоба | `COMPLAINT` | **реализовано** | `PolicyRules` R-03 |
+| C-06 Вызов на дом | `HOME_VISIT_REQUESTED` | каркас | `/api/voice` — сбор данных; МИС-заявка не отправляется |
+| C-10 Напоминания | `CONFIRMED/NO_ANSWER/OPT_OUT` | **план + фиксация** | `ReminderService` — см. §6 |
+| C-11 Лист ожидания | `WAITLISTED` | каркас | формулировка есть, очереди нет |
+
+**Сквозной сценарий C-01 подтверждён живым звонком** (лог: [`docs/call-log-sample.txt`](docs/call-log-sample.txt)):
+приветствие → идентификация → предложение слота → подтверждение → `BOOKED` в МИС.
 
 ---
 
-## Быстрый старт (5 минут)
+## 2. Быстрый старт
 
+Мы поддерживаем два способа запуска: напрямую на хосте (используется на нашем VPS) и через Docker.
+
+### 2.1. Запуск на хосте (Production VPS)
 ```bash
-# 1. Склонировать и перейти в каталог
-git clone <repo> && cd VoiceAssistant/backend
-
-# 2. Подготовить модели (идемпотентно; отсутствие модели не ломает старт)
+# 1. зависимости и модели (~200 МБ)
 ./deploy/fetch-models.sh
 
-# 3. Задать переменные окружения (см. .env.example ниже)
-export DB_HOST=10.2.173.150   # IP ВМ с Postgres
-export DB_PORT=5432
-export DB_NAME=clinic
-export DB_USER=clinic
-export DB_PASSWORD= секреты берутся из .env.local 
-export MIS_TOKEN=<токен команды>
-export JWT_SECRET=<≥32 символа>
+# 2. конфигурация (секреты НЕ в репозитории)
+cp .env.example .env.local
+$EDITOR .env.local           # MIS_TOKEN, JWT_SECRET (>=32), DB_PASSWORD
+chmod 600 .env.local
 
-# 4. Запустить локально (без Docker)
-./gradlew bootRun
-# http://localhost:8000/api/health
+# 3. БД (локальный postgres:16)
+docker compose -f deploy/docker-compose.local.yml up -d
 
-# 5. Проверить, что живо
-curl -s http://localhost:8000/api/health
-# {"status":"UP"}
+# 4. сборка и запуск
+./gradlew bootJar
+./start_server.sh            # читает .env.local, слушает :8000
 ```
 
-Swagger UI: <http://localhost:8000/swagger-ui/index.html>
-OpenAPI: <http://localhost:8000/v3/api-docs>
-
-> **Про порты.** Локальный запуск (`./gradlew bootRun`) — **8000**. Docker-стек
-> (`deploy/docker-compose.yml`) маппит наружу **8090** (`SERVER_PORT=8090` внутри
-> контейнера). В примерах ниже используется **8000**; для Docker замените на **8090**.
-
----
-
-## Запуск с нуля (полная инструкция)
-
-### 1. Подготовка моделей
-
-Модели **не хранятся в Git** (вес > 200 МБ). Скрипт `deploy/fetch-models.sh` скачивает их
-в `models/` и **не падает**, если какой-то URL недоступен — просто логирует `WARN`
-и создаёт пустую заглушку. Без модели NLU бэкенд поднимется, но `parser=rule`
-будет разбирать команды по правилам; без STT — не поднимется AudioSocket, но HTTP-канал
-(`POST /api/voice/command`) продолжит работать.
-
+### 2.2. Запуск через Docker (Альтернатива)
+Если вы хотите запустить всё в контейнерах, используйте `deploy/docker-compose.yml`.
+Убедитесь, что переменные окружения проброшены (файл `.env` рядом с compose).
 ```bash
-./deploy/fetch-models.sh
-# Ожидаемый вывод:
-#   GET .../model.onnx -> models/nlu/model.onnx
-#   GET .../tokenizer_v2.json -> models/nlu/tokenizer_v2.json
-#   ...
-```
-
-Если URL моделей известны заранее — задать их через env:
-```bash
-NLU_MODEL_URL=https://... NLU_TOKENIZER_URL=https://... ./deploy/fetch-models.sh
-```
-
-### 2. Переменные окружения
-
-Полный шаблон — в `.env.example` (в корне `backend/`). Обязательные:
-
-| Переменная | Обязательна | Назначение |
-|---|---|---|
-| `MIS_TOKEN` | да (для записи) | Bearer-токен команды на стенде МИС |
-| `JWT_SECRET` | да | ≥32 символа, секрет для подписи JWT |
-| `DB_HOST` | да (если БД не на localhost) | IP ВМ с Postgres |
-| `DB_PORT` | нет | по умолчанию 5432 |
-| `DB_NAME`, `DB_USER`, `DB_PASSWORD` | да (в Docker) | параметры Postgres |
-| `SCHEDULE_EXCEL_PATH` | нет | путь к `schedule.xlsx` (по умолчанию `data/schedule.xlsx`) |
-| `NLU_MODEL_PATH`, `NLU_TOKENIZER_PATH` | нет | пути к `model.onnx` / `tokenizer_v2.json` |
-| `STT_PUBLIC_READ` | нет | `true` — открыть `/api/stt/public/**` без JWT (только dev!) |
-| `VOICE_PARSER` | нет | `nlu` (по умолчанию) / `rule` / `rag-llm` |
-| `LD_LIBRARY_PATH` | для STT/TTS | каталог с `libonnxruntime.so` |
-
-Полный список — в `src/main/resources/application.yml`.
-
-### 3. Запуск
-
-**Локально (без Docker):**
-```bash
-./gradlew bootRun
-# http://localhost:8000/api/health
-```
-
-**Через IDEA Run Configuration:** Environment Variables — те же, что в п.2 (обязательно
-включая `DB_HOST`, если БД на отдельной ВМ). IDEA Run и `./gradlew bootRun` **не делят
-переменные**: env из IDEA применяется только к IDEA-процессу.
-
-**Docker:**
-```bash
-cp .env.example .env    # заполнить MIS_TOKEN, JWT_SECRET, DB_PASSWORD
 docker compose -f deploy/docker-compose.yml up -d --build
-# http://localhost:8090/api/health
 ```
 
-### 4. Демо-пациенты
-
-`DataSeeder` создаёт пациентов при старте (если их ещё нет в БД):
-
-| Логин | Пароль | ФИО | Дата рождения |
-|---|---|---|---|
-| `smirnova` | `smirnova` | Смирнова Ольга Викторовна | 12.03.1978 |
-| `petrov` | `petrov` | Петров Игорь Николаевич | 05.05.1962 |
-| `ivanov` | `ivanov` | Иванов Сергей Петрович | 03.01.1990 |
-| `admin` | `admin123` | Иван Админов (роль ADMIN) | — |
-
-Пароли хранятся как BCrypt (см. «Безопасность и 152-ФЗ»).
-
-
+**Секреты:** в репозитории только `.env.example` с плейсхолдерами. `.env.local`
+в `.gitignore`. `start_server.sh` без `.env.local` падает с понятной ошибкой —
+случайно задеплоить с пустым токеном нельзя.
 
 ---
 
-## Сценарии (регламент РГ-ТЕЛ-01)
+## 3. Пример реального HTTP-обмена (запись)
 
-| Код | Сценарий | Режим | Статус |
-|---|---|---|---|
-| С-01 | Запись на приём (прямая) | A (авто) | ✅ реализовано |
-| С-02 | Запись по направлению | A | ✅ реализовано |
-| С-03 | Перенос записи | A | ✅ реализовано |
-| С-04 | Отмена записи | A | ✅ реализовано |
-| С-05 | Проверка своей записи | A | ✅ реализовано |
-| С-06 | Вызов врача на дом | П (полуавто) | ✅ реализовано (заявка в МИС) |
-| С-07 | Справка о графике работы | A | ✅ реализовано |
-| С-08 | Готовность анализов | A | ⚠️ статус готовности (значения не передаются) |
-| С-09 | Платные услуги | A / O | ✅ реализовано |
-| С-10 | Исходящий звонок-напоминание | A | 🟡 каркас (`POST /api/voice/reminder`), подробности ниже |
-| С-11 | Лист ожидания | A | ✅ реализовано (при отсутствии слотов) |
-| С-12 | Звонок в интересах ребёнка | A | ✅ реализовано |
-| С-13 | Прикрепление к поликлинике | A | ✅ справка |
-| С-14 | Экстренная ситуация | Экстренно | ✅ реализовано (R-01, прерывает любой сценарий) |
-| С-15 | Жалоба | O (оператор) | ✅ реализовано (R-03) |
-
-**Маршрутизация на оператора (R-01…R-17)** — раздел 7 регламента. Проверяется на
-каждой реплике пациента, до сценария. Красный флаг (R-01) прерывает любой сценарий.
-
-### С-10: Исходящие напоминания
-
-Каркас готов: `POST /api/voice/reminder` возвращает план звонка (когда, сколько попыток,
-что делать при отказе). Сейчас отвечает `501 Not Implemented` с полным описанием плана —
-это осознанное решение: автоматизация исходящих звонков требует Asterisk `Originate`
-и SMS-шлюза, которых в текущем контуре нет. На пилоте сценарий закрывается вручную
-через регистратора.
-
-Ожидаемое поведение по регламенту (раздел «С-10»): звонок за 1 рабочий день, до 2 попыток
-с интервалом 2 часа, при отказе — перенос или отмена, при недозвоне — SMS. Целевой
-эффект — снижение неявок с 18–25% до ≤12%.
-
----
-
-## Пример сессии записи (curl)
-
-Полный сквозной сценарий С-01. Если `MIS_TOKEN` задан и стенд доступен — запись
-создаётся в реальном МИС. Если сеть до стенда недоступна — сценарий корректно
-переводит оператору (R-06), см. «Обработка сбоев».
-
+### 3.1. Логин
 ```bash
-# 1. Логин (демо-пациент из DataSeeder)
-TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+curl -s -X POST localhost:8000/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"login":"smirnova","password":"smirnova"}' | jq -r .token)
-echo "TOKEN=[$TOKEN]"
+  -d '{"login":"smirnova","password":"smirnova"}'
+```
+```json
+{"token":"eyJhbGciOiJIUzI1NiJ9...","login":"smirnova","role":"PATIENT",
+ "firstName":"Ольга","lastName":"Смирнова"}
 ```
 
-**Ответ (этап PENDING_CONFIRMATION — просим подтвердить):**
-
+### 3.2. Запись (шаг 1 — намерение)
 ```bash
-RESP1=$(curl -s -X POST http://localhost:8000/api/voice/command \
+curl -s -X POST localhost:8000/api/voice/command \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"text":"запишите к стоматологу"}')
-SID=$(echo "$RESP1" | jq -r .sessionId)
-echo "$RESP1" | jq
+  -d '{"text":"хочу записаться к стоматологу"}'
 ```
-
 ```json
-{
-  "sessionId": 181,
-  "reply": "Спасибо, Ольга Викторовна. в понедельник, девятнадцатого октября, в девять. Записать вас?",
-  "stage": "PENDING_CONFIRMATION",
-  "needsClarification": false,
-  "unsupported": false,
-  "handedOff": false,
-  "options": ["в понедельник, девятнадцатого октября, в девять, кабинет двести один"],
-  "appointment": null,
-  "proposal": {
-    "action": "BOOK",
-    "doctorId": 1,
-    "date": "2026-10-19",
-    "time": "09:00",
-    "cabinet": 201,
-    "summary": "в понедельник, девятнадцатого октября, в девять, кабинет двести один"
-  },
-  "exchanges": 1,
-  "maxExchanges": 5,
-  "frame": "<BOOK> <DENTIST> <T_UNKNOWN> <END_FRAME>",
-  "parser": "booking-flow",
-  "resultCode": null,
-  "status": "PENDING",
-  "confidence": 0.8
-}
+{"sessionId":1,"reply":"Спасибо, Ольга Викторовна. Записываю: в четверг, первого октября, в девять тридцать, кабинет двести один. Верно?",
+ "stage":"PENDING_CONFIRMATION","needsClarification":false,"unsupported":false,
+ "handedOff":false,"options":["в четверг, первого октября, в девять тридцать"],
+ "appointment":null,
+ "proposal":{"action":"BOOK","doctorId":3,"date":"2026-10-01","time":"09:30",
+             "cabinet":201,"appointmentId":null,"summary":"в четверг, первого октября, в девять тридцать"},
+ "exchanges":1,"maxExchanges":5,"frame":"<BOOK> <DENTIST> <TIME> T_TOMORROW T_MORNING </TIME> <END_FRAME>",
+ "parser":"booking-flow","resultCode":null,"status":"PENDING","confidence":0.8}
 ```
 
-**Подтверждение:**
-
+### 3.3. Подтверждение (шаг 2 — запись в МИС)
 ```bash
-curl -s -X POST http://localhost:8000/api/voice/answer \
+curl -s -X POST localhost:8000/api/voice/answer \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"sessionId\":$SID,\"text\":\"да\"}" | jq
+  -d '{"sessionId":1,"text":"да"}'
 ```
-
-**Ответ (запись создана в МИС):**
-
 ```json
-{
-  "sessionId": 181,
-  "reply": "Готово, вы записаны. в понедельник, девятнадцатого октября, в девять, Смирнов Алексей Викторович, кабинет двести один. SMS придёт на этот номер.",
-  "stage": "CONFIRMED",
-  "handedOff": false,
-  "options": [],
-  "appointment": {
-    "id": 99,
-    "doctorName": "Смирнов Алексей Викторович",
-    "specialty": "Стоматолог",
-    "date": "2026-10-19",
-    "time": "09:00",
-    "status": "CONFIRMED"
-  },
-  "proposal": null,
-  "resultCode": "BOOKED",
-  "status": "BOOKED",
-  "confidence": 0.95
-}
+{"sessionId":1,"reply":"Готово, вы записаны. в четверг, первого октября, в девять тридцать, кабинет двести один. SMS придёт на этот номер.",
+ "stage":"CONFIRMED","needsClarification":false,"unsupported":false,"handedOff":false,
+ "options":[],"appointment":{"id":99,"doctorId":3,"doctorName":"Сидорова Клавдия Егоровна",
+   "specialty":"Стоматолог-терапевт","date":"2026-10-01","time":"09:30","status":"CONFIRMED"},
+ "proposal":null,"exchanges":2,"maxExchanges":5,"frame":"...","parser":"booking-flow",
+ "resultCode":"BOOKED","status":"BOOKED","confidence":0.95}
 ```
 
-**Ответ, если МИС недоступна по сети (R-06):**
-
-```json
-{
-  "sessionId": 181,
-  "reply": "Система записи временно недоступна. Соединяю с регистратором.",
-  "stage": "OPERATOR",
-  "handedOff": true,
-  "appointment": null,
-  "resultCode": "ESCALATED",
-  "status": "ESCALATED",
-  "confidence": 0.5
-}
-```
-
-> Поля `resultCode`, `status`, `confidence` добавлены на верхний уровень, чтобы
-> и пациент, и внешние интеграторы видели результат явно:
-> - `status`: `BOOKED` / `PENDING` / `ESCALATED` / `INFO` — короткий статус для UI;
-> - `confidence`: 0.0…1.0 — уверенность ассистента (0.95 — запись/справка, 0.8 — ждём
-    >   подтверждения, 0.5 — перевод оператору);
-> - `resultCode`: полный код по Приложению Г регламента (`BOOKED`, `RESCHEDULED`,
-    >   `CANCELLED`, `INFO_GIVEN`, `ESCALATED`, `EMERGENCY`, `COMPLAINT`, `WAITLISTED`,
-    >   `HOME_VISIT_REQUESTED`).
+**Ключевые поля для интегратора:**
+- `status` — `BOOKED | PENDING | ESCALATED | INFO | DONE` (для UI);
+- `resultCode` — код из Приложения Г (`BOOKED`, `RESCHEDULED`, `EMERGENCY`, ...);
+- `confidence` — 0.95 при подтверждённой записи, 0.8 при ожидании подтверждения,
+  0.5 при переводе оператору (ассистент честно признаёт, что не справился);
+- `handedOff: true` + `resultCode: "ESCALATED"` — перевод, причина в `stage`/логе.
 
 ---
 
-## Безопасность и 152-ФЗ
+## 4. Телефонный канал (Asterisk AudioSocket)
 
-| Аспект | Как соблюдено |
-|---|---|
-| **Локальность моделей** | NLU (ONNX), STT (GigaAM/sherpa-onnx), TTS (Piper) — все в контуре заказчика. Облачные ASR-сервисы (Google, Yandex, Whisper-API) **не используются**. |
-| **Транскрипты** | `/api/stt/public/**` выключен по умолчанию (`STT_PUBLIC_READ=false`) **и** закрыт JWT в `SecurityConfig` — двойная защита. Основной `/api/stt/*` — под JWT. |
-| **Пароли** | BCrypt (в `SecurityConfig`). В API не отдаются (`UserDto` без поля `password`). |
-| **Логи** | ФИО в `RestMisClient`/`EscalationService` маскируются (`Смирнова О.`). Транскрипты в `DialogueManager` логируются в сокращённом виде (`abbreviate`, до 60 символов). |
-| **Срок хранения** | `DialogueSession.expiresAt` — 90 дней (раздел 8 регламента). Чистка — `DialogueManager.purgeExpiredTranscripts()`. |
-| **Согласие на запись** | Регламент 3.4: приветствие содержит «Разговор записывается». Отказ пациента (`PolicyRules.isRecordingOptOut`) — флаг `recordingOptOut`, аудио не сохраняется. |
+Приём звонка: TCP `:8091`, протокол AudioSocket (TLV, PCM 16-bit 8 kHz little-endian).
+Asterisk подключается сюда **не по HTTP** — это отдельный порт.
 
----
+### 4.1. Ключевые решения (иначе звонок не работает)
 
-## Обработка сбоев
-
-| Сбой | Действие |
-|---|---|
-| МИС вернула **429** | `RestMisClient` ждёт `Retry-After` (до `MIS_RETRY_MAX_WAIT_SECONDS=5`), повторяет до 2 раз. Если не помогло — `MisRateLimitedException` → 503 + `Retry-After`, сценарий переводит оператору (R-06). |
-| МИС вернула **500** / timeout | `MisUnavailableException` → 502 с внятным `message`, сценарий переводит оператору (R-06). Запись в БД создаётся только после успешного создания в МИС. |
-| МИС недоступна (`DisabledMisClient`) | Справочные сценарии работают, запись → перевод оператору. `/api/voice/parser` покажет `misAvailable: false, misClient: DisabledMisClient`. |
-| STT/TTS модель не загрузилась | Бэкенд стартует, HTTP-канал работает, AudioSocket-порт не поднимается. В логах — `WARN` с причиной (`UnsatisfiedLinkError: libonnxruntime.so` — проверить `LD_LIBRARY_PATH`). |
-| NLU-модель не загрузилась | `parser` падает на `rule`-реализацию (детерминированную). Сценарий продолжает работать. `/api/nlu/status` покажет `ready: false` и причину. |
-| Битый Excel расписания | `ScheduleProvider.health().readable() == false`, `/api/voice/parser` покажет ошибку. Запись → перевод оператору. |
-
----
-
-## Архитектура
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                       Телефонный канал                           │
-│   Asterisk ──AudioSocket(TCP:8091)──► AsteriskAudioSocketServer  │
-│                                          │                        │
-│                                          ▼                        │
-│                                    SpeechRecognizer               │
-│                                     (GigaAM/sherpa)               │
-└──────────────────────────────────────────┬───────────────────────┘
-                                           │ текст
-                                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    Диалоговый контур                             │
-│                                                                  │
-│  CallDialogueService ──► DialogueManager ──► BookingFlow         │
-│                                │                 │               │
-│                                ▼                 ▼               │
-│                          PolicyRules        CommandParser        │
-│                          (R-01…R-17)       (nlu/rule/rag-llm)   │
-│                                                  │               │
-│                                                  ▼               │
-│                                            TimeResolver          │
-│                                                  │               │
-│                                                  ▼               │
-│                                            SlotResolver          │
-└──────────────────────────────────────────┬───────────────────────┘
-                                           │ слот
-                                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                      Интеграции                                  │
-│  ScheduleProvider          MisClient          AppointmentService │
-│  (db | excel)          (RestMisClient)        (локальная БД)     │
-│                              │                                   │
-│                              ▼                                   │
-│                       Стенд «Регистратура»                       │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**Порты** (интерфейсы) — ключ к заменяемости:
-
-| Порт | Реализации | Переключение |
+| Место | Решение | Зачем |
 |---|---|---|
-| `ScheduleProvider` | `DbScheduleProvider`, `ExcelScheduleProvider` | `SCHEDULE_SOURCE=db|excel` |
-| `CommandParser` | `NluCommandParser`, `RuleCommandParser`, `RagLlmCommandParser` | `VOICE_PARSER=nlu|rule|rag-llm` |
-| `NluModel` | `OnnxNluModel`, заглушка | `NLU_ENABLED` |
-| `MisClient` | `RestMisClient`, `DisabledMisClient`, `FakeMisClient` | `MIS_TOKEN` |
-| `SpeechRecognizer` | `SherpaSttEngine` | `STT_ENABLED` |
-| `ReplySynthesizer` | `SherpaTtsEngine`, `SilentReplySynthesizer` | `TTS_ENABLED` |
-| `LlmClient` | `OpenAiCompatibleLlmClient` | `LLM_ENABLED` |
-| `PatientIdentityResolver` | `DbPatientIdentityResolver` | — (один) |
+| `extensions.conf` | `AudioSocket(...,c(slin))` | µ-law → PCM16; без `c(slin)` GigaAM получает мусор |
+| `CallVoice.ECHO_TAIL_MS=800` | входящее аудио игнорируется 800 мс после TTS | гасит акустическое эхо из динамика телефона |
+| `segmenter.reset()` после TTS | очистка накопителя фраз | эхо не «прилипает» к фразе пациента |
+| `CallVoice.awaitFinished()` | ждёт `queue.isEmpty() && !speaking` | иначе соединение закрывается до конца фразы |
+| `PcmResampler` | 8→16 кГц, state между чанками | Asterisk шлёт 320 байт (~319 сэмплов 16 кГц) |
+
+Полный лог эталонного звонка — [`docs/call-log-sample.txt`](docs/call-log-sample.txt).
+
+### 4.2. Диагностика
+`/api/stt/status` — модель, порт, `listening`, счётчики `spokenOk/spokenFailed`.
+`/api/stt/public/last` — последняя фраза (только при `STT_PUBLIC_READ=true`, по умолчанию **выключено**).
+`AUDIO_RX`/`VAD`/`STT_RAW` — `log.debug`, включаются `app.stt.debug-audio=true`.
 
 ---
 
-## Диагностика
+## 5. Ограничения кейса и как они соблюдены
 
-| Эндпоинт | Что показывает |
+| Ограничение | Как соблюдено |
 |---|---|
-| `GET /api/health` | Живость приложения |
-| `GET /api/voice/parser` | Активный парсер, `misAvailable` (доступна ли реальная МИС), имя клиента (`RestMisClient` / `DisabledMisClient`) |
-| `GET /api/nlu/status` | NLU-модель загружена, ошибка инициализации |
-| `GET /api/mis/status` | `available` — идёт ли интеграция в реальную МИС или `Disabled` |
-| `GET /api/stt/status` | STT-модель, AudioSocket-порт, TTS, статистика озвучки |
-| `GET /api/llm/status` | LLM включена, какая модель |
-| `GET /api/voice/sessions` | Стенограммы своих сессий (под JWT) |
-| `POST /api/voice/reminder` | Каркас С-10: 501 с планом звонка |
+| 152-ФЗ: ПДн не уходят в облака | STT (GigaAM) и TTS (Piper) — **локальные** ONNX-модели; LLM по умолчанию `LLM_ENABLED=false` |
+| 152-ФЗ: маскировка ПДн в логах | `RestMisClient.mask()` → «Смирнова О.»; логи не содержат ФИО целиком |
+| 152-ФЗ: срок хранения стенограмм | `DialogueSession.expiresAt` = +90 дней, `purgeExpiredTranscripts()` |
+| 152-ФЗ: отказ от записи | `PolicyRules.isRecordingOptOut` → `recordingOptOut=true` |
+| Медицинские вопросы → оператор | `PolicyRules` R-04, граничные фразы (раздел 3.8) |
+| Красные флаги → 103/112 | `PolicyRules` R-01 (категория А), R-11 (Б); `BookingFlow` прерывает сценарий |
+| Просьба человека → немедленно | `PolicyRules` R-02, без уговоров |
+| Лимит МИС 10/мин | `RestMisClient.rateLimit()` 8/мин + retry на 429 (`Retry-After`, до 2 попыток) |
+| Нельзя менять отменённую запись | `RestMisClient.cancelVisit` → PATCH `status=Отменена` |
 
-### Проверка NLU-модели
+---
 
-```bash
-curl -s -X POST http://localhost:8000/api/nlu/parse \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"запишите к стоматологу завтра утром"}' | jq
-```
+## 6. С-10: Исходящие напоминания
 
-Ожидаемый ответ:
-```json
-{
-  "frame": "<BOOK> <DENTIST> <TIME> T_TOMORROW T_MORNING </TIME> <END_FRAME>",
-  "intent": "BOOK",
-  "specialty": "DENTIST",
-  "timeFactors": ["T_TOMORROW", "T_MORNING"],
-  "symptoms": [],
-  "sourceText": "запишите к стоматологу завтра утром",
-  "model": "onnx:model.onnx"
-}
-```
-
-### Проверка расписания
+**Статус:** планировщик и фиксация результата реализованы; `Originate` через Asterisk AMI —
+этап 2 пилота (не в этой итерации).
 
 ```bash
-curl -s "http://localhost:8000/api/schedule?date=2026-10-19" \
+# план обзвона на завтра
+curl -s -X POST localhost:8000/api/voice/reminder/plan \
   -H "Authorization: Bearer $TOKEN"
+# {"date":"2026-10-20","tasks":[
+#   {"appointmentId":42,"clientLogin":"smirnova","slot":"2026-10-20 09:30",
+#    "doctorName":"Сидорова Клавдия Егоровна","attempts":0}]}
+
+# фиксация результата обзвона
+curl -s -X POST localhost:8000/api/voice/reminder/mark \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"appointmentId":42,"resultCode":"CONFIRMED"}'
+# {"appointmentId":42,"resultCode":"CONFIRMED","recorded":true}
 ```
 
-### Проверка МИС
-
-```bash
-curl -s http://localhost:8000/api/voice/parser \
-  -H "Authorization: Bearer $TOKEN" | jq
-# {"parser":"nlu",...,"misAvailable":true,"misClient":"RestMisClient"}
-```
+Регламент (С-10): за 1 рабочий день, до 2 попыток с интервалом 2 часа, при недозвоне — SMS.
+Коды результата (`CONFIRMED`, `RESCHEDULED`, `CANCELLED`, `NO_ANSWER`, `OPT_OUT`) — в коде и API.
 
 ---
 
-## Известные ограничения
+## 7. Тесты
 
-- **С-10 (исходящие напоминания)** — каркас без Asterisk `Originate`. См. раздел «С-10».
-- **С-08 (готовность анализов)** — отдаётся только статус «готов / в работе», без значений
-  (врачебная тайна, регламент §3.8).
-- **С-09 (платные услуги)** — только справочник цен, оплата — офлайн в кассе.
-- **Сетевой доступ к МИС на dev-машине.** На локальном прогоне (19.10.2026)
-  `crm-med-mock.dbi-testing.ru` был недоступен — таймаут TCP 20 с. Сценарий записи
-  корректно переводит звонок оператору (R-06) — это **штатное поведение** по регламенту,
-  а не ошибка. На целевой ВМ платформы стенд доступен; в тестах
-  `BookingFlowTest.bookEndToEnd` доказывает, что при доступной МИС запись создаётся
-  (`resultCode: "BOOKED"`).
-- **CallVoice** — поток озвучки не разбивает ответ на предложения; для длинных ответов
-  пауза между фразами почти незаметна. Не влияет на бизнес-логику, вынесено в TODO.
-- **STT/TTS на dev-машине** — при запуске `./gradlew bootRun` из терминала может не
-  найтись `libonnxruntime.so` (`UnsatisfiedLinkError`). Лечится `LD_LIBRARY_PATH` или
-  запуском через IDEA Run Configuration. HTTP-сценарий записи от этого не зависит.
-- **Тесты `ExcelScheduleProviderTest`, `CallVoiceSpeakTest`, `CallVoiceSplitTest`** —
-  помечены `@Disabled` с пояснением: требуют реального аудио-потока / Excel-фикстуры,
-  не влияют на бизнес-логику.
-
-### Тесты
-
-```bash
-./gradlew test
-# 95 tests passed, 3 skipped (BUILD SUCCESSFUL)
+```
+$ ./gradlew test
+...
+BUILD SUCCESSFUL
+95 tests completed, 3 skipped
 ```
 
-Ключевые тесты:
+Полный лог: [`docs/test-report.txt`](docs/test-report.txt).
 
-| Тест | Что доказывает |
-|---|---|
-| `BookingFlowTest.bookEndToEnd` | Сценарий С-01 доходит до `resultCode: "BOOKED"` (на моках МИС) |
-| `PolicyRulesAnswerTest` | «нет» после «да» трактуется как отказ (боевые звонки #21, #25) |
-| `PatientNameParserBirthDateTest` | Год словами («тысяча девятьсот семьдесят восьмого») разбирается |
-| `RussianTimeTest` | Даты и время озвучиваются словами по регламенту 3.2 |
-| `PcmResamplerTest` | 8 кГц → 16 кГц без искажений (телефония) |
+**Что покрыто тестами (ключевое):**
+- `BookingFlowTest` — полный цикл С-01 (намерение → идентификация → подтверждение → BOOKED);
+- `IdentityRetryTest` — лестница Р-05 (2 неудачи → оператор);
+- `PolicyRulesAnswerTest` — «последнее слово» («верно нет» = отказ), боевые звонки #21/#25;
+- `RussianTimeTest` — разбор/озвучка дат («в четверг, первого октября»);
+- `PatientNameParserBirthDateTest` — год словами («тысяча девятьсот семьдесят восьмого»);
+- `ScheduleQueryServiceTest` — С-07 не уходит в запись;
+- `SlotHorizonTest` — горизонт 14 дней, детерминированные часы;
+- `PcmConverterTest`, `PcmResamplerTest` — телефония (little-endian, 8→16 кГц, VAD).
+
+3 `@Disabled` — тесты, требующие реального аудио-потока Asterisk (в CI не воспроизводимы);
+их роль выполняет `docs/call-log-sample.txt`.
 
 ---
 
-## Лицензия и контакты
+## 8. Архитектура
 
-Учебный хакатонный проект. Все данные пациентов в `DataSeeder` — **вымышленные**
-(Смирнова, Петров, Иванов), используются только для демонстрации сценария С-01.
+```
+voice/    BookingFlow (сценарий), PolicyRules (R-01..R-17), SlotResolver, TimeResolver,
+          ScheduleQueryService (С-07), RussianTime, DialogueManager
+nlu/      OnnxNluModel + FrameAutomaton (constrained decoding), BpeTokenizer
+stt/      AsteriskAudioSocketServer (AudioSocket), CallVoice (TTS-поток),
+          SherpaSttEngine (GigaAM), SherpaTtsEngine (Piper), PcmResampler
+mis/      MisClient (порт) → RestMisClient (стенд) | DisabledMisClient | FakeMisClient
+schedule/ ScheduleProvider (порт) → DbScheduleProvider | ExcelScheduleProvider
+identity/ PatientIdentityResolver, PatientNameParser (детерминированный, без нейросети)
+security/ JwtService, JwtAuthFilter, BCryptPasswordEncoder
+```
 
+Замена любого этапа (NLU/STT/TTS/МИС/расписание) — один бин в конфиге, остальной код не меняется.
+
+---
+
+## 9. Секреты и эксплуатация
+
+- **В репозитории секретов нет.** Только `.env.example` с плейсхолдерами.
+- `.env.local` — в `.gitignore`, читается `start_server.sh`.
+- `JWT_SECRET` — минимум 32 символа (проверка в `JwtService` и `start_server.sh`).
+- Пароли — BCrypt(10), `PlainTextPasswordEncoder` удалён.
+- `STT_PUBLIC_READ=false` по умолчанию — транскрипты под JWT.
+- Диагностические `STT_RAW`/`AUDIO_RX`/`VAD` — `log.debug`, включаются `app.stt.debug-audio=true`.
