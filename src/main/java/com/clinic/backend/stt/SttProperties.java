@@ -124,4 +124,18 @@ public class SttProperties {
     public void setSpeakReplies(boolean speakReplies) {
         this.speakReplies = speakReplies;
     }
+
+    /**
+     * Включать ли подробную диагностику аудио (AUDIO_RX, VAD, TTS_STATE).
+     * По умолчанию false: в продакшене логи должны быть чистыми.
+     */
+    private boolean debugAudio = false;
+
+    public boolean isDebugAudio() {
+        return debugAudio;
+    }
+
+    public void setDebugAudio(boolean debugAudio) {
+        this.debugAudio = debugAudio;
+    }
 }

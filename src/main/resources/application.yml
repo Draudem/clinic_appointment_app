@@ -114,6 +114,7 @@ app:
     silence-rms-threshold: ${STT_SILENCE_RMS_THRESHOLD:0.08}
     # Отдавать ли распознанный текст обратно в сокет.
     speak-replies: ${STT_SPEAK_REPLIES:false}
+    debug-audio: ${STT_DEBUG_AUDIO:false}
 
   # LLM-этап (задел под Ollama / OpenAI-совместимый API). По умолчанию выключен:
   # на текущем сервере Ollama не помещается вместе с Postgres и JVM.

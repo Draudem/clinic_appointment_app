@@ -103,6 +103,16 @@ public class RestMisClient implements MisClient {
         return parse(res.body(), MisEscalation.class);
     }
 
+    /**
+     * Пример запроса списка с пагинацией (лимит 50 — требование стенда).
+     * В реальном коде используется для кэширования справочника.
+     */
+    public String fetchDoctorsPage(int offset) {
+        log.info("МИС: GET /doctors?limit=50&offset={}", offset);
+        HttpResponse<String> res = send("GET", "/doctors?limit=50&offset=" + offset, null);
+        return res.body();
+    }
+
     // --- Инфраструктура HTTP ---
 
     private HttpResponse<String> send(String method, String path, String body) {
@@ -121,9 +131,12 @@ public class RestMisClient implements MisClient {
                         .header("User-Agent", "ClinicVoiceAssistant/1.0")
                         .timeout(Duration.ofSeconds(props.getTimeoutSeconds()));
 
-                if ("POST".equals(method)) b.POST(HttpRequest.BodyPublishers.ofString(body));
-                else if ("PATCH".equals(method)) b.method("PATCH", HttpRequest.BodyPublishers.ofString(body));
-                else b.GET();
+                if ("POST".equals(method) || "PATCH".equals(method)) {
+                    String safeBody = body == null ? "{}" : body;
+                    b.method(method, HttpRequest.BodyPublishers.ofString(safeBody));
+                } else {
+                    b.GET();
+                }
 
                 HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
                 log.debug("МИС: ответ HTTP {} на {} {} (попытка {}/{})",

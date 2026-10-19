@@ -42,17 +42,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * акустическое эхо — голос ассистента через динамик телефона попадает
  * в микрофон и без гейтинга распознаётся как «речь клиента».
  *
- * <p>ДИАГНОСТИКА (временно, для наладки STT):
- * <ul>
- *   <li>{@code AUDIO_RX #N}: первые 20 кадров каждого звонка — bytes, rms, speaking, first16.</li>
- *   <li>{@code VAD}: первые 50 окон {@link UtteranceSegmenter} — rms, silenceRun, speechStarted.</li>
- *   <li>{@code TTS_STATE}: переходы {@link CallVoice#isSpeaking()} true→false / false→true.</li>
- *   <li>{@code STT_RAW}: каждые 5 секунд весь накопленный буфер уходит в STT, минуя VAD.
- *       Показывает, работает ли GigaAM на шуме. Если {@code STT_RAW} осмысленный —
- *       проблема только в VAD-пороге; если мусор — нужен AEC/denoise.</li>
- * </ul>
- * Все диагностические логи — {@code ERROR}, чтобы попасть в вывод при любом уровне.
- * После наладки — убрать.
+ * <p>ДИАГНОСТИКА: включается флагом `app.stt.debug-audio=true`.
+ * В продакшене отключена, чтобы не забивать логи.
  */
 @Component
 @ConditionalOnProperty(prefix = "app.stt", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -157,13 +148,11 @@ public class AsteriskAudioSocketServer implements Runnable {
         CallVoice voice = null;
         int turns = 0;
 
-        // --- ДИАГНОСТИКА ---
+        // --- ДИАГНОСТИКА (только при debug-audio=true) ---
         int audioFrameCount = 0;
         int vadWindowCount = 0;
         int ttsTransitionCount = 0;
         boolean prevSpeaking = false;
-        // STT_RAW: независимый буфер для принудительной отправки в STT каждые 5 сек.
-        // UtteranceSegmenter.takeUtterance() НЕ вызываем, чтобы не обнулить VAD.
         List<Float> rawBuffer = new ArrayList<>();
         int rawBufferCounter = 0;
         final int RAW_FRAMES = 500;   // 500 кадров × 10 мс = 5 сек
@@ -174,8 +163,7 @@ public class AsteriskAudioSocketServer implements Runnable {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             OutputStream out = socket.getOutputStream();
 
-            // Голосовой поток живёт всё время звонка: синтезирует и отправляет,
-            // а поток чтения продолжает принимать и распознавать речь клиента.
+            // Голосовой поток живёт всё время звонка
             voice = new CallVoice(out, synthesizer);
             voice.enqueue(dialogue.greeting());
             log.info("Звонок #{}: озвучено приветствие, синтез {}", callId, synthesizer.name());
@@ -209,8 +197,8 @@ public class AsteriskAudioSocketServer implements Runnable {
                         log.info("Звонок #{}: UUID {}", callId, callUuid);
                     }
                     case TYPE_AUDIO -> {
-                        // ДИАГНОСТИКА: первые 20 кадров звонка
-                        if (audioFrameCount++ < 20) {
+                        // ДИАГНОСТИКА: первые 20 кадров звонка (только при debug-audio=true)
+                        if (props.isDebugAudio() && audioFrameCount++ < 20) {
                             double rms = rms(payload);
                             log.error("AUDIO_RX #{}: bytes={}, rms≈{}, speaking={}, first16={}",
                                     audioFrameCount, payload.length,
@@ -223,28 +211,29 @@ public class AsteriskAudioSocketServer implements Runnable {
                         float[] at8k = PcmResampler.bytesToFloat(payload, 0, payload.length);
                         float[] at16k = resampler.resample(at8k);
 
-                        // STT_RAW: копим ВСЁ аудио (включая шум и эхо) в отдельный буфер.
-                        // Раз в 5 сек — отправляем в STT. Это НЕ влияет на VAD.
-                        for (float v : at16k) {
-                            rawBuffer.add(v);
-                        }
-                        if (++rawBufferCounter >= RAW_FRAMES && !rawBuffer.isEmpty()) {
-                            rawBufferCounter = 0;
-                            float[] raw = new float[rawBuffer.size()];
-                            for (int i = 0; i < raw.length; i++) {
-                                raw[i] = rawBuffer.get(i);
+                        // STT_RAW: только если включена отладка
+                        if (props.isDebugAudio()) {
+                            for (float v : at16k) {
+                                rawBuffer.add(v);
                             }
-                            rawBuffer.clear();
-                            String text = recognizer.transcribe(raw);
-                            log.error("STT_RAW: {} сэмплов ({} с), «{}»",
-                                    raw.length,
-                                    String.format("%.2f", raw.length / 16000.0),
-                                    text);
+                            if (++rawBufferCounter >= RAW_FRAMES && !rawBuffer.isEmpty()) {
+                                rawBufferCounter = 0;
+                                float[] raw = new float[rawBuffer.size()];
+                                for (int i = 0; i < raw.length; i++) {
+                                    raw[i] = rawBuffer.get(i);
+                                }
+                                rawBuffer.clear();
+                                String text = recognizer.transcribe(raw);
+                                log.error("STT_RAW: {} сэмплов ({} с), «{}»",
+                                        raw.length,
+                                        String.format("%.2f", raw.length / 16000.0),
+                                        text);
+                            }
                         }
 
                         // ── VAD-ГЕЙТИНГ: пока ассистент говорит, не слушаем микрофон ──
                         boolean nowSpeaking = callVoice.isSpeaking();
-                        if (ttsTransitionCount < 20 && nowSpeaking != prevSpeaking) {
+                        if (props.isDebugAudio() && ttsTransitionCount < 20 && nowSpeaking != prevSpeaking) {
                             log.error("TTS_STATE #{}: speaking {} -> {}",
                                     ++ttsTransitionCount, prevSpeaking, nowSpeaking);
                             prevSpeaking = nowSpeaking;
@@ -252,13 +241,13 @@ public class AsteriskAudioSocketServer implements Runnable {
 
                         if (!nowSpeaking && prevSpeaking) {
                             segmenter.reset();
-                            log.error("VAD_RESET: после TTS, буфер очищен");
+                            if (props.isDebugAudio()) {
+                                log.error("VAD_RESET: после TTS, буфер очищен");
+                            }
                         }
 
                         if (nowSpeaking) {
                             // Сбрасываем накопитель, чтобы эхо не «прилипло»
-                            // к следующей фразе клиента.
-                            //segmenter.reset();
                             continue;
                         }
 
@@ -270,7 +259,7 @@ public class AsteriskAudioSocketServer implements Runnable {
                             start = end;
 
                             // ДИАГНОСТИКА: первые 50 окон
-                            if (vadWindowCount++ < 50) {
+                            if (props.isDebugAudio() && vadWindowCount++ < 50) {
                                 log.error("VAD #{}: rms≈{}, silenceRun={}, speechStarted={}, bufferedSeconds={}",
                                         vadWindowCount,
                                         String.format("%.4f", windowRms(piece)),
