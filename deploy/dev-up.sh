@@ -193,7 +193,15 @@ esac
 # --- сборка и запуск ---
 export SERVER_PORT DB_HOST="$PG_HOST" DB_PORT="$PG_PORT" DB_NAME="$PG_DB" DB_USER="$PG_USER" DB_PASSWORD="$PG_PASS"
 export NLU_MODEL_PATH="$MODEL" NLU_TOKENIZER_PATH="$TOK"
-export JWT_SECRET="${JWT_SECRET:-dev-secret-change-me-0123456789abcdefghijklmnop}"
+if [[ -z "${JWT_SECRET:-}" && -f .env.local ]]; then
+  set -a; source .env.local; set +a
+fi
+: "${JWT_SECRET:?JWT_SECRET не задан (ни в окружении, ни в .env.local)}"
+if [[ ${#JWT_SECRET} -lt 32 ]]; then
+  echo "ОШИБКА: JWT_SECRET короче 32 символов" >&2
+  exit 1
+fi
+export JWT_SECRET
 
 say "Сборка JAR"
 ( cd "$BACKEND_DIR" && ./gradlew -q bootJar )

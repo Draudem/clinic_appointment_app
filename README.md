@@ -43,7 +43,7 @@ export DB_HOST=10.2.173.150   # IP ВМ с Postgres
 export DB_PORT=5432
 export DB_NAME=clinic
 export DB_USER=clinic
-export DB_PASSWORD=clinic
+export DB_PASSWORD= секреты берутся из .env.local 
 export MIS_TOKEN=<токен команды>
 export JWT_SECRET=<≥32 символа>
 

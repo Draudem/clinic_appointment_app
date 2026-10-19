@@ -28,7 +28,7 @@ spring:
 app:
   jwt:
     # Секрет обязателен >= 32 символов; в проде/докере переопределяется через env JWT_SECRET
-    secret: ${JWT_SECRET:dev-secret-change-me-0123456789abcdefghijklmnop}
+    secret: ${JWT_SECRET}
     ttl-seconds: ${JWT_TTL_SECONDS:86400}
 
   mis:
