@@ -53,9 +53,15 @@ public class CallDialogueService {
      */
     public Turn onUtterance(String callKey, String text, String ani) {
         Turn turn = dialogue.handleByCall(callKey, ani, text);
-        log.info("Звонок {}: этап={} действие={} реплика=«{}» ответ=«{}»",
-                callKey, turn.stage(), turn.action(),
-                abbreviate(text), abbreviate(turn.reply()));
+        if (turn.action() == Turn.Action.TRANSFER) {
+            log.info("Звонок {}: ПЕРЕВОД (причина: {}) этап={} реплика=«{}» ответ=«{}»",
+                    callKey, turn.transferReason(), turn.stage(),
+                    abbreviate(text), abbreviate(turn.reply()));
+        } else {
+            log.info("Звонок {}: этап={} действие={} уверенность={} реплика=«{}» ответ=«{}»",
+                    callKey, turn.stage(), turn.action(), turn.confidence(),
+                    abbreviate(text), abbreviate(turn.reply()));
+        }
         return turn;
     }
 

@@ -77,10 +77,11 @@ public class BookingFlow {
                 session.setStage("CONFIRMED");
             }
             session.append("ассистент", verdict.reply());
-            return new Turn(verdict.reply(),
-                    verdict.decision() == PolicyRules.Decision.TRANSFER
-                            ? Turn.Action.TRANSFER : Turn.Action.HANGUP,
-                    session.getStage(), List.of(), verdict.rule(), verdict.resultCode(), 0);
+            if (verdict.decision() == PolicyRules.Decision.TRANSFER) {
+                return Turn.transferWithReason(verdict.reply(), verdict.rule(), verdict.resultCode(), 0, "RED_FLAG_OR_POLICY");
+            } else {
+                return Turn.hangup(verdict.reply(), session.getStage(), verdict.resultCode(), 0);
+            }
         }
 
         if (!PolicyRules.expectsYesNo(session.getStage()) && PolicyRules.isGarbage(text)) {
@@ -684,8 +685,18 @@ public class BookingFlow {
                 }
             });
         }
-
-        return Turn.transfer(reply, rule, "ESCALATED", session.getMissCount());
+        String reason = switch (rule) {
+            case "R-01" -> "RED_FLAG_EMERGENCY"; // 103/112
+            case "R-02" -> "OPERATOR_REQUEST";   // попросил человека
+            case "R-03" -> "COMPLAINT";          // жалоба
+            case "R-04" -> "MEDICAL_QUESTION";   // мед. вопрос
+            case "R-05" -> "MAX_MISUNDERSTANDING"; // не понял 3 раза
+            case "R-06" -> "MIS_UNAVAILABLE";    // система упала
+            case "R-07" -> "IDENTIFICATION_FAILED"; // не нашли в базе
+            case "R-11" -> "RED_FLAG_ACUTE";     // острое состояние
+            default -> "UNKNOWN";
+        };
+        return Turn.transferWithReason(reply, rule, "ESCALATED", session.getMissCount(), reason);
     }
 
     Turn.Slot toSlot(SlotResolver.Slot s) {
