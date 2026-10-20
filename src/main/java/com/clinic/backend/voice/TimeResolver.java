@@ -255,6 +255,8 @@ public final class TimeResolver {
         // день недели без отрицания
         if (date == null) {
             DayOfWeek wd = weekdayOf(q, "в ");
+            if (wd == null) wd = weekdayOf(q, "на ");
+            if (wd == null) wd = weekdayOf(q, "ближайший ");
             if (wd != null) {
                 date = RussianTime.nextWeekday(today, wd);
             }
@@ -272,7 +274,7 @@ public final class TimeResolver {
 
     private static DayOfWeek weekdayOf(String text, String prefix) {
         for (DayOfWeek d : DayOfWeek.values()) {
-            String nominative = switch (d) {
+            String stem = switch (d) {
                 case MONDAY -> "понедельник";
                 case TUESDAY -> "вторник";
                 case WEDNESDAY -> "сред";
@@ -281,9 +283,7 @@ public final class TimeResolver {
                 case SATURDAY -> "суббот";
                 case SUNDAY -> "воскресень";
             };
-            if (text.contains(prefix + nominative)) {
-                return d;
-            }
+            if (text.contains(stem)) return d;
         }
         return null;
     }

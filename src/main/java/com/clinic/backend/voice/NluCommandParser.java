@@ -44,8 +44,25 @@ public class NluCommandParser implements CommandParser {
         String intent = frame.intent();
 
         String q = ClinicalKnowledgeBase.normalize(text);
+        // Предохранитель для переноса
         if (q.contains("перенес") || q.contains("перезапиш") || q.contains("поменяй") || q.contains("сдвин")) {
             intent = "RESCHEDULE";
+        }
+
+        // Предохранитель для справки о графике (С-07)
+        if (q.contains("график") || q.contains("расписание") || q.contains("режим работы")
+                || q.contains("во сколько") || q.contains("до скольки") || q.contains("кабинет")
+                || q.contains("этаж") || q.contains("адрес")) {
+            intent = "SCHEDULE";
+        }
+
+        // Предохранитель для анализов (С-08)
+        if (q.contains("анализ") || q.contains("результат") || q.contains("кровь готова") || q.contains("гормоны готовы")) {
+            intent = "LAB_STATUS";
+        }
+        // Предохранитель для отмены (С-04)
+        else if (q.contains("отмен") || q.contains("снимите") || q.contains("не приду") || q.contains("удалите запись")) {
+            intent = "CANCEL";
         }
         boolean unsupported = frame.unsupported();
 

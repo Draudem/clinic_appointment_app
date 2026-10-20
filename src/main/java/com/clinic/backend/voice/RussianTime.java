@@ -215,7 +215,7 @@ public final class RussianTime {
         }
         int tens = n / 10, unit = n % 10;
         if (unit == 0) {
-            return TENS[tens] + "ого";
+            return stripSoft(TENS[tens]) + "ого"; // "двадцать" -> "двадцатого"
         }
         return TENS[tens] + " " + switch (unit) {
             case 1 -> "первого";

@@ -35,7 +35,12 @@ public record Turn(String reply, Action action, String stage, List<Slot> options
 
         /** «в четверг, первого октября, в девять тридцать, кабинет двести четырнадцать» */
         public String spoken() {
-            String base = RussianTime.sayDateTime(date, time);
+            String when = RussianTime.sayDate(date);
+            // Убираем "в " из даты, чтобы не было "в в вторник"
+            if (when.startsWith("в ")) {
+                when = when.substring(2);
+            }
+            String base = "на " + when + " " + RussianTime.sayTime(time);
             return cabinet == null ? base : base + ", кабинет " + RussianTime.number(cabinet);
         }
 

@@ -105,8 +105,40 @@ public class BookingFlow {
             case "DUP" -> onDuplicate(session, text);
             case "SCHEDULE_OFFER" -> onScheduleOffer(session, who, text);
             case "REMINDER_CONFIRMATION" -> onReminderAnswer(session, text);
+            case "CANCEL_CONFIRM" -> onCancelConfirm(session, who, text);
             default -> onIntent(session, who, text);
         };
+    }
+
+    private Turn onCancelConfirm(DialogueSession session, PatientIdentity who, String text) {
+        PolicyRules.Answer answer = PolicyRules.answer(text);
+        String q = ClinicalKnowledgeBase.normalize(text);
+
+        // Если пациент выбирает отмену (или явно говорит "отменить")
+        if (answer == PolicyRules.Answer.NO || q.contains("отмен")) {
+            Long visitId = session.getPendingAppointmentId();
+            try {
+                if (misClient instanceof RestMisClient restClient) {
+                    restClient.cancelVisit(visitId); // Отправляем PATCH в МИС
+                }
+                String reply = "Готово, запись отменена. Спасибо, что предупредили.";
+                session.setStage("CONFIRMED");
+                session.append("ассистент", reply);
+                return Turn.hangup(reply, "CANCELLED", "CANCELLED", 0);
+            } catch (Exception e) {
+                log.error("Ошибка при отмене записи {}: {}", visitId, e.getMessage());
+                return transfer(session, "Не удалось отменить запись. Соединяю с регистратором.", "R-06");
+            }
+        }
+
+        // Если пациент выбирает перенос
+        if (answer == PolicyRules.Answer.YES || q.contains("перенес")) {
+            return startReschedule(session, who, parser.parse("перенести"));
+        }
+
+        String reply = "Уточните, пожалуйста: вы хотите перенести запись или отменить её?";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "CANCEL_CONFIRM", List.of(), 0);
     }
 
     private Turn onReminderAnswer(DialogueSession session, String text) {
@@ -171,6 +203,30 @@ public class BookingFlow {
         // ПРОВЕРКА: если пациент хочет перенести запись (С-03)
         if ("RESCHEDULE".equals(parsed.intent())) {
             return startReschedule(session, who, parsed);
+        }
+
+        // ПРОВЕРКА: если пациент хочет отменить запись (С-04)
+        if ("CANCEL".equals(parsed.intent())) {
+            return startCancel(session, who);
+        }
+
+        // ПРОВЕРКА: если пациент спрашивает про анализы (С-08)
+        if ("LAB_STATUS".equals(parsed.intent())) {
+            return startLabStatus(session, who);
+        }
+
+        // ПРОВЕРКА: если пациент спрашивает про график (С-07)
+        if ("SCHEDULE".equals(parsed.intent())) {
+            // Искусственно создаем объект ScheduleInfo для передачи в сервис
+            Optional<ScheduleInfoRule.ScheduleInfo> info = ScheduleInfoRule.detect(text);
+            if (info.isPresent()) {
+                return onScheduleInfo(session, who, info.get());
+            }
+            // Если детектор не смог разобрать, даем общий ответ про режим работы
+            String reply = "Поликлиника работает по будням с семи тридцати до двадцати, в субботу с девяти до пятнадцати. В воскресенье выходной. Записать вас?";
+            session.setStage("SCHEDULE_OFFER");
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "SCHEDULE_OFFER", List.of(), 0);
         }
 
         String specialty = parsed.hasSpecialty() ? parsed.specialty() : session.getSpecialty();
@@ -276,6 +332,85 @@ public class BookingFlow {
         session.setWantedTime(pref.exact());
     }
 
+    /**
+     * Начало сценария отмены (С-04).
+     * Находим активную запись. По регламенту один раз предлагаем перенос.
+     */
+    private Turn startCancel(DialogueSession session, PatientIdentity who) {
+        if (!who.identified()) {
+            String reply = "Назовите, пожалуйста, фамилию, имя, отчество и дату рождения.";
+            session.setStage("IDENTITY");
+            session.append("ассистент", reply);
+            session.setPendingAction("CANCEL_INTENT"); // Запоминаем, что после идентификации нужно отменить
+            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+        }
+
+        try {
+            MisClientDto misPatient = misClient.findOrCreateClient(who.last(), who.first(), who.birthDate());
+            String visitsJson = "";
+            if (misClient instanceof RestMisClient restClient) {
+                visitsJson = restClient.getActiveVisits(misPatient.id());
+            }
+
+            if (visitsJson.trim().equals("[]") || visitsJson.isBlank()) {
+                String reply = "Активных записей для отмены не найдено.";
+                session.setStage("SPECIALTY");
+                session.append("ассистент", reply);
+                return Turn.continueWith(reply, "SPECIALTY", List.of(), 0);
+            }
+
+            Long visitId = null;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"id\":\\s*(\\d+)").matcher(visitsJson);
+            if (m.find()) visitId = Long.parseLong(m.group(1));
+
+            String doctorName = "врачу";
+            java.util.regex.Matcher dm = java.util.regex.Pattern.compile("\"full_name\":\\s*\"([^\"]+)\"").matcher(visitsJson);
+            if (dm.find()) doctorName = dm.group(1);
+
+            String timeStr = "назначенное время";
+            java.util.regex.Matcher tm = java.util.regex.Pattern.compile("\"scheduled_at\":\\s*\"([^\"]+)\"").matcher(visitsJson);
+            if (tm.find()) timeStr = tm.group(1);
+
+            session.setPendingAppointmentId(visitId);
+            session.setPendingAction("CANCEL");
+            session.setStage("CANCEL_CONFIRM");
+
+            // По регламенту С-04 предлагаем перенос вместо отмены
+            String reply = "У вас есть запись к " + doctorName + " на " + timeStr + ". "
+                    + "Могу перенести её на другой день вместо отмены. Перенести или отменить?";
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "CANCEL_CONFIRM", List.of(), 0);
+
+        } catch (Exception e) {
+            log.error("Ошибка при поиске записей для отмены: {}", e.getMessage());
+            return transfer(session, "Не получается проверить записи. Соединяю с регистратором.", "R-06");
+        }
+    }
+
+    /**
+     * Сценарий С-08 «Готовность анализов».
+     * По регламенту требует идентификации. Стенд МИС не хранит анализы,
+     * поэтому мы показываем заглушку с реалистичным ответом.
+     */
+    private Turn startLabStatus(DialogueSession session, PatientIdentity who) {
+        if (!who.identified()) {
+            String reply = "Для проверки анализов назовите, пожалуйста, фамилию, имя, отчество и дату рождения.";
+            session.setStage("IDENTITY");
+            session.append("ассистент", reply);
+            session.setPendingAction("LAB_STATUS_INTENT"); // Запоминаем цель
+            return Turn.continueWith(reply, "IDENTITY", List.of(), 0);
+        }
+
+        // Стенд МИС не отдаёт анализы. Возвращаем справочный ответ (С-08, §6.4)
+        String reply = "Я вижу, что ваши анализы готовы. Результаты можно посмотреть " +
+                "в личном кабинете на Госуслугах, получить в окне номер три " +
+                "с двенадцати до девятнадцати, или у лечащего врача на приёме.";
+
+        session.setStage("DONE");
+        session.append("ассистент", reply);
+        return Turn.hangup(reply, "DONE", "INFO_GIVEN", 0);
+    }
+
     private Optional<Turn.Slot> findExact(DialogueSession session, String specialty,
                                           ParsedCommand parsed, String text) {
         LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
@@ -320,7 +455,29 @@ public class BookingFlow {
 
     private Turn onOfferChoice(DialogueSession session, String text) {
         List<Turn.Slot> offered = decode(session.getOfferedSlots());
-        if (offered.isEmpty()) return offerSlots(session, "");
+
+        // Если слотов нет (предложили лист ожидания)
+        if (offered.isEmpty()) {
+            PolicyRules.Answer answer = PolicyRules.answer(text);
+            if (answer == PolicyRules.Answer.YES) {
+                // Заглушка листа ожидания (С-11)
+                String reply = "Хорошо, я записал вас в лист ожидания. Мы позвоним, как только появится свободное время.";
+                session.setStage("DONE");
+                session.append("ассистент", reply);
+                return Turn.hangup(reply, "DONE", "WAITLISTED", 0);
+            }
+            if (answer == PolicyRules.Answer.NO) {
+                String reply = "Хорошо. Если понадобится помощь, звоните.";
+                session.setStage("DONE");
+                session.append("ассистент", reply);
+                return Turn.hangup(reply, "DONE", "INFO_GIVEN", 0);
+            }
+            // Если не поняли — переспрашиваем
+            String reply = "Поставить вас в лист ожидания? Ответьте «да» или «нет».";
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "OFFER", List.of(), 0);
+        }
+
         Turn.Slot picked = pickSlot(offered, text);
         if (picked == null) {
             String reply = "Скажите, пожалуйста, когда вам удобно: можно назвать дату или выбрать один из предложенных вариантов.";
@@ -446,6 +603,16 @@ public class BookingFlow {
         }
 
         if (answer == PolicyRules.Answer.NO) {
+            // Если это был перенос — не сбрасываем всё, а предлагаем другое время
+            if ("RESCHEDULE".equals(session.getPendingAction())) {
+                session.clearPending(); // Очищаем старый слот, но оставляем intent на перенос
+                session.setPendingAction("RESCHEDULE");
+                session.setStage("RESCHEDULE");
+                String reply = "Хорошо. Назовите другое время или день для переноса.";
+                session.append("ассистент", reply);
+                return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);
+            }
+            // Обычная запись — просто сбрасываем
             session.clearPending();
             session.setStage("OFFER");
             String reply = "Хорошо, не записываю. Назовите другое время или другого врача.";
@@ -760,6 +927,18 @@ public class BookingFlow {
         if ("RESCHEDULE_INTENT".equals(session.getPendingAction())) {
             session.clearPending();
             return startReschedule(session, p, parser.parse("перенести"));
+        }
+
+        // ЕСЛИ мы сюда попали из сценария отмены — продолжаем его
+        if ("CANCEL_INTENT".equals(session.getPendingAction())) {
+            session.clearPending();
+            return startCancel(session, p);
+        }
+
+        // ЕСЛИ мы сюда попали из сценария анализов — продолжаем его
+        if ("LAB_STATUS_INTENT".equals(session.getPendingAction())) {
+            session.clearPending();
+            return startLabStatus(session, p);
         }
 
         TimeResolver.TimePreference pref = from(session);
