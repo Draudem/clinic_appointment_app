@@ -12,38 +12,23 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Голосовой ассистент записи.
- *
- * Мобильное приложение распознаёт речь НА УСТРОЙСТВЕ и присылает текст:
- *   POST /api/voice/command  {"text":"запишите к стоматологу завтра утром"}
- *   POST /api/voice/answer   {"sessionId":1,"text":"да"}   (продолжение)
- * Если всё же прислали аудио (пока заглушка STT):
- *   POST /api/voice/audio    multipart/form-data, поле "audio"
- *
- * После предложения ассистент просит подтверждение (PENDING_CONFIRMATION):
- * ответ «да»/«нет» продолжает диалог, запись выполняется только при «да».
- */
 @RestController
 @RequestMapping("/api/voice")
 @Tag(name = "Voice", description = "Голосовая запись (текст от мобильного STT)")
 public class VoiceController {
 
     private final DialogueManager dialogue;
-    private final SpeechToText speechToText;
     private final DialogueSessionRepository sessions;
     private final CommandParser parser;
     private final VoiceProperties props;
     private final MisClient misClient;
 
     public VoiceController(DialogueManager dialogue,
-                           SpeechToText speechToText,
                            DialogueSessionRepository sessions,
                            CommandParser parser,
                            VoiceProperties props,
                            MisClient misClient) {
         this.dialogue = dialogue;
-        this.speechToText = speechToText;
         this.sessions = sessions;
         this.parser = parser;
         this.props = props;
@@ -66,34 +51,12 @@ public class VoiceController {
         return dialogue.handleForApi(auth.getName(), request.sessionId(), request.text());
     }
 
-    @PostMapping(value = "/audio", consumes = "multipart/form-data")
-    @Operation(summary = "Голосовая запись из аудио (STT пока заглушка)")
-    public VoiceReply audio(Authentication auth,
-                            @RequestParam(value = "sessionId", required = false) Long sessionId,
-                            @RequestParam("audio") org.springframework.web.multipart.MultipartFile audio) {
-        try {
-            String text = speechToText.transcribe(audio.getBytes(), audio.getContentType());
-            return dialogue.handleForApi(auth.getName(), sessionId, text);
-        } catch (java.io.IOException e) {
-            throw new SpeechToTextException("Не удалось прочитать аудио: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Диагностика голосового контура: активный парсер, режим STT, лимит обменов
-     * и — главное — доступна ли реальная МИС.
-     *
-     * <p>{@code misAvailable} различает «RestMisClient настроен и работает»
-     * и «DisabledMisClient (нет токена / MIS_ENABLED=false)». Без него не видно,
-     * почему запись уходит оператору: то ли МИС недоступна, то ли что-то ещё.
-     */
     @GetMapping("/parser")
     @Operation(summary = "Какой парсер команд активен и доступна ли МИС")
     public Map<String, Object> parser() {
         Map<String, Object> info = new LinkedHashMap<>();
         info.put("parser", parser.name());
         info.put("configured", props.getParser());
-        info.put("speechToText", speechToText.name());
         info.put("maxExchanges", props.getMaxExchanges());
         info.put("misAvailable", misClient.available());
         info.put("misClient", misClient.getClass().getSimpleName());
