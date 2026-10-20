@@ -188,7 +188,7 @@ public final class PolicyRules {
     /** Совпадение с одной из фраз — целиком либо как отдельное предложение. */
     private static boolean matches(String text, String... phrases) {
         for (String p : phrases) {
-            if (text.contains(p)) {
+            if (java.util.regex.Pattern.compile("\\b" + p + "\\b").matcher(text).find()) {
                 return true;
             }
         }

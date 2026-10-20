@@ -30,6 +30,7 @@ public class RestMisClient implements MisClient {
     private final MisProperties props;
     private final ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private final HttpClient http;
+    private static final int MIS_PAGE_LIMIT = 50;
 
     // Простой rate-limiter (скользящее окно)
     private final AtomicInteger requestCount = new AtomicInteger(0);
@@ -101,8 +102,7 @@ public class RestMisClient implements MisClient {
     public Long findDoctorIdByFio(String fio) {
         if (fio == null || fio.isBlank()) return null;
         try {
-            HttpResponse<String> res = send("GET", "/doctors?limit=50", null);
-            String body = res.body();
+            HttpResponse<String> res = send("GET", "/doctors?limit=" + MIS_PAGE_LIMIT, null);            String body = res.body();
 
             int fioIndex = body.indexOf("\"" + fio + "\"");
             if (fioIndex == -1) {

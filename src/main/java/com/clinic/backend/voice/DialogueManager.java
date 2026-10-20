@@ -202,9 +202,17 @@ public class DialogueManager {
      */
     VoiceReply toReply(DialogueSession session, Turn turn) {
         Map<String, Object> appointment = null;
+        String statusText = switch (statusOf(turn)) {
+            case "BOOKED" -> "Запись подтверждена в МИС";
+            case "PENDING" -> "Ожидает подтверждения пациентом";
+            case "ESCALATED" -> "Переведено на оператора";
+            default -> "Информация предоставлена";
+        };
+
         if ("BOOKED".equals(turn.resultCode()) || "RESCHEDULED".equals(turn.resultCode())) {
             appointment = bookedAppointment(session);
         }
+
         Map<String, Object> proposal = new LinkedHashMap<>();
         if (session.getPendingDoctorId() != null) {
             proposal.put("action", session.getPendingAction());
@@ -232,6 +240,7 @@ public class DialogueManager {
                 "booking-flow",
                 turn.resultCode(),
                 statusOf(turn),
+                statusOf(turn), // <--- ДОБАВЛЕН statusText (или можешь написать русский перевод)
                 confidenceOf(turn));
     }
 

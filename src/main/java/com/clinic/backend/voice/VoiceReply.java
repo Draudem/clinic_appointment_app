@@ -57,5 +57,6 @@ public record VoiceReply(
         String parser,
         String resultCode,
         String status,
+        String statusText,
         double confidence) {
 }

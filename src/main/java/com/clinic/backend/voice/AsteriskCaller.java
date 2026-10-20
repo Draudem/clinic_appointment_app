@@ -27,40 +27,31 @@ public class AsteriskCaller {
     public static final Map<String, Long> ACTIVE_REMINDER_CALLS = new ConcurrentHashMap<>();
 
     public boolean originateCall(Long appointmentId) {
-        String target = endpointPrefix;
-        String callUuid = UUID.randomUUID().toString(); // Генерируем настоящий UUID
+        String target = endpointPrefix; // Берется из конфига, не из текста пациента
+        String callUuid = UUID.randomUUID().toString();
 
-        // Запоминаем, что этот UUID принадлежит записи #appointmentId
         ACTIVE_REMINDER_CALLS.put(callUuid, appointmentId);
 
-        // Передаем UUID в Asterisk как переменную
-        String cmd = String.format(
-                "asterisk -rx \"channel originate %s extension %s@%s\"",
-                target, callUuid, context
+        // Безопасный вызов через ProcessBuilder (без шелла)
+        ProcessBuilder pb = new ProcessBuilder(
+                "asterisk", "-rx",
+                String.format("channel originate %s extension %s@%s", target, callUuid, context)
         );
 
         log.info("С-10: Инициируем звонок по записи #{} с UUID {}", appointmentId, callUuid);
 
         try {
-            Process process = Runtime.getRuntime().exec(new String[]{"/bin/sh", "-c", cmd});
+            Process process = pb.start();
             boolean finished = process.waitFor(10, TimeUnit.SECONDS);
 
             if (!finished) {
                 process.destroy();
                 return false;
             }
-
-            int exitCode = process.exitValue();
-            if (exitCode == 0) {
-                log.info("С-10: Asterisk успешно принял команду Originate");
-                return true;
-            } else {
-                ACTIVE_REMINDER_CALLS.remove(callUuid); // Очищаем при ошибке
-                return false;
-            }
+            return process.exitValue() == 0;
         } catch (Exception e) {
-            ACTIVE_REMINDER_CALLS.remove(callUuid);
             log.error("С-10: Ошибка Asterisk: {}", e.getMessage());
+            ACTIVE_REMINDER_CALLS.remove(callUuid);
             return false;
         }
     }
