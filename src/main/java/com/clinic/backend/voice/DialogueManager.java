@@ -309,6 +309,27 @@ public class DialogueManager {
         return flow.lastBooking(session.getPatientLogin());
     }
 
+    @Transactional
+    public Turn startReminder(String callKey, Long appointmentId) {
+        DialogueSession session = new DialogueSession("");
+        session.setCallKey(callKey);
+        session.setPendingAction("REMINDER");
+        session.setPendingAppointmentId(appointmentId);
+        session.setStage("REMINDER_CONFIRMATION");
+        session.resetForNewCall(); // сбрасываем старое
+        session.setPendingAppointmentId(appointmentId); // возвращаем после сброса
+        session.setStage("REMINDER_CONFIRMATION");
+        session.setPendingAction("REMINDER");
+
+        sessions.save(session);
+
+        // Возвращаем Turn, который скажет "Здравствуйте! Напоминаю вам о записи..."
+        // Но так как мы пока не загружаем детали записи из МИС, скажем общее приветствие.
+        String reply = "Здравствуйте! Это виртуальный помощник поликлиники номер семь. Напоминаю о вашей записи на завтра. Вы придёте?";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "REMINDER_CONFIRMATION", List.of(), 0);
+    }
+
     /** Удаляет стенограммы старше срока хранения (раздел 8 регламента: не более 90 дней). */
     @Transactional
     public int purgeExpiredTranscripts() {

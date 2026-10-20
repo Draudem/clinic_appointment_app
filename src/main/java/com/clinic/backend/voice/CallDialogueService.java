@@ -45,6 +45,14 @@ public class CallDialogueService {
     }
 
     /**
+     * Начало исходящего звонка-напоминания (С-10).
+     * В отличие от входящего, здесь мы сразу знаем ID записи.
+     */
+    public Turn startReminderCall(String callKey, Long appointmentId) {
+        log.info("С-10: Начало сценария напоминания для записи #{}", appointmentId);
+        return dialogue.startReminder(callKey, appointmentId);
+    }
+    /**
      * Одна распознанная реплика пациента.
      *
      * @param callKey идентификатор звонка (UUID от Asterisk)

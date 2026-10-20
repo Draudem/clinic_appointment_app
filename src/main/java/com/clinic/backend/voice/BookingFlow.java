@@ -104,8 +104,28 @@ public class BookingFlow {
             case "RESCHEDULE" -> onReschedule(session, who, text);
             case "DUP" -> onDuplicate(session, text);
             case "SCHEDULE_OFFER" -> onScheduleOffer(session, who, text);
+            case "REMINDER_CONFIRMATION" -> onReminderAnswer(session, text);
             default -> onIntent(session, who, text);
         };
+    }
+
+    private Turn onReminderAnswer(DialogueSession session, String text) {
+        PolicyRules.Answer answer = PolicyRules.answer(text);
+        if (answer == PolicyRules.Answer.YES) {
+            session.setStage("CONFIRMED");
+            String reply = "Отлично, ждём вас. Всего доброго!";
+            session.append("ассистент", reply);
+            return Turn.hangup(reply, "CONFIRMED", "CONFIRMED", 0);
+        }
+        if (answer == PolicyRules.Answer.NO) {
+            session.setStage("OFFER");
+            String reply = "Хорошо. Давайте перенесём запись. Назовите удобное время или день.";
+            session.append("ассистент", reply);
+            return Turn.continueWith(reply, "OFFER", List.of(), 0);
+        }
+        String reply = "Подтвердите, пожалуйста: вы придёте на приём? Ответьте «да» или «нет».";
+        session.append("ассистент", reply);
+        return Turn.continueWith(reply, "REMINDER_CONFIRMATION", List.of(), 0);
     }
 
     private Turn onScheduleInfo(DialogueSession session, PatientIdentity who,
@@ -223,9 +243,14 @@ public class BookingFlow {
             java.util.regex.Matcher tm = java.util.regex.Pattern.compile("\"scheduled_at\":\\s*\"([^\"]+)\"").matcher(visitsJson);
             if (tm.find()) timeStr = tm.group(1);
 
+            // Вытаскиваем специальность врача из JSON (чтобы знать, к кому искать слоты)
+            String specStr = null;
+            java.util.regex.Matcher sm = java.util.regex.Pattern.compile("\"specialty\":\\s*\"([^\"]+)\"").matcher(visitsJson);
+            if (sm.find()) specStr = sm.group(1);
+
             session.setPendingAppointmentId(visitId);
             session.setPendingAction("RESCHEDULE");
-            session.setSpecialty(null); // Специальность уточним позже
+            session.setSpecialty(specStr); // Сохраняем специальность!
 
             LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
             TimeResolver.TimePreference pref = from(session);
@@ -583,17 +608,22 @@ public class BookingFlow {
     }
 
     private Turn onReschedule(DialogueSession session, PatientIdentity who, String text) {
+        // Если есть предложенные слоты, проверяем, не выбрал ли пациент один из них
         if (session.getOfferedSlots() != null && !session.getOfferedSlots().isBlank()) {
             List<Turn.Slot> offered = decode(session.getOfferedSlots());
             Turn.Slot picked = pickSlot(offered, text);
             if (picked != null) return toRescheduleConfirm(session, picked);
         }
+
+        // Если специальность известна, пробуем найти слот по названному времени
         if (session.getSpecialty() != null) {
             LocalDate today = LocalDate.now(ZoneOffset.ofHours(4));
+            // ТЕПЕРЬ МЫ ПЕРЕДАЕМ ТЕКСТ В TimeResolver, ЧТОБЫ ОН НАШЕЛ ДАТУ!
             TimeResolver.TimePreference pref = TimeResolver.resolve(List.of(), text, today);
             Optional<Turn.Slot> other = slots.findSlot(session.getSpecialty(), pref, today).map(this::toSlot);
             if (other.isPresent()) return toRescheduleConfirm(session, other.get());
         }
+
         String reply = "Назовите дату и время для переноса.";
         session.append("ассистент", reply);
         return Turn.continueWith(reply, "RESCHEDULE", List.of(), 0);

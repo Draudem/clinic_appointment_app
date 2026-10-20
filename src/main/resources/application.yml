@@ -74,6 +74,12 @@ app:
       path: ${SCHEDULE_EXCEL_PATH:data/schedule.xlsx}
       sheet: ${SCHEDULE_EXCEL_SHEET:}
 
+  asterisk:
+    # Контекст в extensions.conf для исходящих звонков
+    context: reminder-answered
+    # Префикс для звонка (как в твоей команде channel originate)
+    endpoint-prefix: PJSIP/phone-092@gateway
+
   # Синтез речи для голосового ответа в трубку (Piper ru_RU-irina, женский голос).
   # Если модель не найдена или TTS_ENABLED=false — работает заглушка: звонящий слышит
   # тишину, но звонки принимаются и речь распознаётся как обычно.
